@@ -538,12 +538,17 @@ impl SourceCollector {
             .values()
             .map(|spec| spec.full_path.clone())
             .collect::<Vec<_>>();
+        let mut transition_bundles =
+            collect_transition_doc_runtime_bundles(manifest_dir, out_dir, &runtime_spec_paths)?;
         let mut runtime_bundles =
             collect_runtime_graphs(manifest_dir, out_dir, &runtime_spec_paths)?;
         for spec in by_path.values() {
-            if runtime_bundles
+            if transition_bundles
                 .iter()
                 .all(|bundle| bundle.spec_name != spec.tail_ident)
+                && runtime_bundles
+                    .iter()
+                    .all(|bundle| bundle.spec_name != spec.tail_ident)
             {
                 runtime_bundles.push(spec.viz_bundle());
             }
@@ -557,6 +562,7 @@ impl SourceCollector {
                 overlay_spec_doc_metadata(bundle, spec);
             }
         }
+        transition_bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
         runtime_bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
 
         let doc_dir = out_dir.join("nirvash-doc");
@@ -573,44 +579,83 @@ impl SourceCollector {
                 viz_dir.display()
             ))
         })?;
-        let active_names = runtime_bundles
+        let active_names = transition_bundles
             .iter()
             .map(|bundle| bundle.spec_name.clone())
+            .chain(
+                runtime_bundles
+                    .iter()
+                    .map(|bundle| bundle.spec_name.clone()),
+            )
             .collect::<BTreeSet<_>>();
         remove_stale_generated_outputs(&doc_dir, "md", &active_names)?;
         remove_stale_generated_outputs(&viz_dir, "json", &active_names)?;
 
+        let transition_by_name = transition_bundles
+            .iter()
+            .map(|bundle| (bundle.spec_name.clone(), bundle))
+            .collect::<BTreeMap<_, _>>();
+        let runtime_by_name = runtime_bundles
+            .iter()
+            .map(|bundle| (bundle.spec_name.clone(), bundle))
+            .collect::<BTreeMap<_, _>>();
+
         let mut fragments = Vec::new();
-        for bundle in &runtime_bundles {
-            let spec_name = bundle.spec_name.clone();
+        for spec_name in &active_names {
             let env_key = format!("NIRVASH_DOC_FRAGMENT_{}", to_upper_snake(&spec_name));
             let path = doc_dir.join(format!("{spec_name}.md"));
             let viz_path = viz_dir.join(format!("{spec_name}.json"));
-            fs::write(
-                &viz_path,
-                serde_json::to_vec_pretty(&bundle).map_err(|error| {
+            if let Some(bundle) = transition_by_name.get(spec_name) {
+                fs::write(
+                    &viz_path,
+                    serde_json::to_vec_pretty(bundle).map_err(|error| {
+                        err(format!(
+                            "failed to serialize transition documentation bundle {}: {error}",
+                            viz_path.display()
+                        ))
+                    })?,
+                )
+                .map_err(|error| {
                     err(format!(
-                        "failed to serialize visualization bundle {}: {error}",
+                        "failed to write transition documentation bundle {}: {error}",
                         viz_path.display()
                     ))
-                })?,
-            )
-            .map_err(|error| {
-                err(format!(
-                    "failed to write visualization bundle {}: {error}",
-                    viz_path.display()
-                ))
-            })?;
-            fs::write(
-                &path,
-                render_viz_fragment_with_catalog(bundle, &runtime_bundles),
-            )
-            .map_err(|error| {
-                err(format!(
-                    "failed to write documentation fragment {}: {error}",
-                    path.display()
-                ))
-            })?;
+                })?;
+                fs::write(&path, render_transition_doc_fragment(bundle)).map_err(|error| {
+                    err(format!(
+                        "failed to write documentation fragment {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            } else if let Some(bundle) = runtime_by_name.get(spec_name) {
+                fs::write(
+                    &viz_path,
+                    serde_json::to_vec_pretty(bundle).map_err(|error| {
+                        err(format!(
+                            "failed to serialize visualization bundle {}: {error}",
+                            viz_path.display()
+                        ))
+                    })?,
+                )
+                .map_err(|error| {
+                    err(format!(
+                        "failed to write visualization bundle {}: {error}",
+                        viz_path.display()
+                    ))
+                })?;
+                fs::write(
+                    &path,
+                    render_viz_fragment_with_catalog(bundle, &runtime_bundles),
+                )
+                .map_err(|error| {
+                    err(format!(
+                        "failed to write documentation fragment {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            } else {
+                continue;
+            }
             fragments.push(GeneratedFragment { env_key, path });
         }
 
@@ -917,6 +962,187 @@ fn collect_runtime_graphs(
     read_runtime_graph_bundles(&runner_stdout, &runner_manifest)
 }
 
+fn collect_transition_doc_runtime_bundles(
+    manifest_dir: &Path,
+    out_dir: &Path,
+    spec_paths: &[Vec<String>],
+) -> Result<Vec<nirvash::TransitionDocBundle>, DynError> {
+    let manifest_path = manifest_dir.join("Cargo.toml");
+    if !manifest_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let metadata = read_cargo_metadata(&manifest_path)?;
+    let canonical_manifest = fs::canonicalize(&manifest_path).map_err(|error| {
+        err(format!(
+            "failed to resolve manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let current_package = metadata
+        .packages
+        .iter()
+        .find(|package| {
+            fs::canonicalize(&package.manifest_path)
+                .map(|path| path == canonical_manifest)
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            err(format!(
+                "failed to locate current package for {} in cargo metadata",
+                manifest_path.display()
+            ))
+        })?;
+    current_package
+        .targets
+        .iter()
+        .find(|target| target.kind.iter().any(|kind| kind == "lib"))
+        .ok_or_else(|| {
+            err(format!(
+                "nirvash-docgen requires a library target in package `{}`",
+                current_package.name
+            ))
+        })?;
+    let nirvash_manifest = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "nirvash")
+        .and_then(|package| package.manifest_path.parent().map(Path::to_path_buf))
+        .ok_or_else(|| err("failed to locate `nirvash` package in cargo metadata"))?;
+
+    let runner_dir = out_dir.join("nirvash-transition-doc-runner");
+    let runner_src_dir = runner_dir.join("src");
+    fs::create_dir_all(&runner_src_dir).map_err(|error| {
+        err(format!(
+            "failed to create transition doc runner directory {}: {error}",
+            runner_src_dir.display()
+        ))
+    })?;
+
+    let runner_manifest = runner_dir.join("Cargo.toml");
+    let runner_main = runner_src_dir.join("main.rs");
+    fs::write(
+        &runner_manifest,
+        render_runner_manifest(manifest_dir, &current_package.name, &nirvash_manifest),
+    )
+    .map_err(|error| {
+        err(format!(
+            "failed to write transition doc runner manifest {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
+    fs::write(&runner_main, render_transition_doc_runner_main(spec_paths)).map_err(|error| {
+        err(format!(
+            "failed to write transition doc runner source {}: {error}",
+            runner_main.display()
+        ))
+    })?;
+
+    let runner_target_dir = out_dir.join("nirvash-transition-doc-runner-target");
+    let runner_stdout = out_dir.join("nirvash-transition-doc-runner.stdout.ndjson");
+    let runner_stderr = out_dir.join("nirvash-transition-doc-runner.stderr.log");
+    let progress_enabled = env::var_os("NIRVASH_DOCGEN_PROGRESS").is_some();
+    let stdout_file = File::create(&runner_stdout).map_err(|error| {
+        err(format!(
+            "failed to create transition doc runner stdout {}: {error}",
+            runner_stdout.display()
+        ))
+    })?;
+    let stderr_file = File::create(&runner_stderr).map_err(|error| {
+        err(format!(
+            "failed to create transition doc runner stderr {}: {error}",
+            runner_stderr.display()
+        ))
+    })?;
+    if progress_enabled {
+        println!(
+            "cargo:warning=nirvash-docgen transition doc progress log: {}",
+            runner_stderr.display()
+        );
+    }
+    let runner_stderr_for_thread = runner_stderr.clone();
+
+    let mut command = Command::new(cargo_binary());
+    command
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(&runner_manifest)
+        .arg("--target-dir")
+        .arg(&runner_target_dir)
+        .env("NIRVASH_DOCGEN_SKIP", "1")
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::piped());
+    if progress_enabled {
+        command.env("NIRVASH_DOCGEN_PROGRESS", "1");
+    }
+    let mut child = command.spawn().map_err(|error| {
+        err(format!(
+            "failed to execute transition doc runner {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
+    let child_stderr = child.stderr.take().ok_or_else(|| {
+        err(format!(
+            "failed to capture transition doc runner stderr for {}",
+            runner_manifest.display()
+        ))
+    })?;
+    let stderr_forwarder = std::thread::spawn(move || -> Result<(), String> {
+        let reader = BufReader::new(child_stderr);
+        let mut log_file = stderr_file;
+        for line in reader.lines() {
+            let line = line.map_err(|error| {
+                format!(
+                    "failed to read transition doc runner stderr {}: {error}",
+                    runner_stderr_for_thread.display()
+                )
+            })?;
+            writeln!(log_file, "{line}").map_err(|error| {
+                format!(
+                    "failed to write transition doc runner stderr log {}: {error}",
+                    runner_stderr_for_thread.display()
+                )
+            })?;
+            if progress_enabled {
+                eprintln!("{line}");
+            }
+        }
+        log_file.flush().map_err(|error| {
+            format!(
+                "failed to flush transition doc runner stderr log {}: {error}",
+                runner_stderr_for_thread.display()
+            )
+        })
+    });
+    let status = child.wait().map_err(|error| {
+        err(format!(
+            "failed to wait for transition doc runner {}: {error}",
+            runner_manifest.display()
+        ))
+    })?;
+    stderr_forwarder
+        .join()
+        .map_err(|_| err("transition doc runner stderr forwarder panicked"))?
+        .map_err(err)?;
+
+    if !status.success() {
+        let stderr = fs::read_to_string(&runner_stderr).unwrap_or_else(|error| {
+            format!(
+                "failed to read transition doc runner stderr {}: {error}",
+                runner_stderr.display()
+            )
+        });
+        return Err(err(format!(
+            "transition doc runner failed for {}:\n{}",
+            runner_manifest.display(),
+            stderr
+        )));
+    }
+
+    read_transition_doc_bundles(&runner_stdout, &runner_manifest)
+}
+
 fn read_runtime_graph_bundles(
     runner_stdout: &Path,
     runner_manifest: &Path,
@@ -951,6 +1177,56 @@ fn read_runtime_graph_bundles(
             ))
         })?;
         nirvash::upsert_spec_viz_bundle(&mut bundles_by_name, bundle);
+    }
+
+    let mut bundles = bundles_by_name.into_values().collect::<Vec<_>>();
+    bundles.sort_by(|left, right| left.spec_name.cmp(&right.spec_name));
+    Ok(bundles)
+}
+
+fn read_transition_doc_bundles(
+    runner_stdout: &Path,
+    runner_manifest: &Path,
+) -> Result<Vec<nirvash::TransitionDocBundle>, DynError> {
+    let stdout_file = File::open(runner_stdout).map_err(|error| {
+        err(format!(
+            "failed to open transition doc output {}: {error}",
+            runner_stdout.display()
+        ))
+    })?;
+    let reader = BufReader::new(stdout_file);
+    let mut bundles_by_name = BTreeMap::<String, nirvash::TransitionDocBundle>::new();
+
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|error| {
+            err(format!(
+                "failed to read transition doc output line {} from {}: {error}",
+                line_index + 1,
+                runner_stdout.display()
+            ))
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let bundle =
+            serde_json::from_str::<nirvash::TransitionDocBundle>(line).map_err(|error| {
+                err(format!(
+                    "failed to parse transition doc output line {} from {} (runner {}): {error}",
+                    line_index + 1,
+                    runner_stdout.display(),
+                    runner_manifest.display()
+                ))
+            })?;
+        if bundles_by_name
+            .insert(bundle.spec_name.clone(), bundle)
+            .is_some()
+        {
+            return Err(err(format!(
+                "duplicate transition doc bundle for runner {}",
+                runner_manifest.display()
+            )));
+        }
     }
 
     let mut bundles = bundles_by_name.into_values().collect::<Vec<_>>();
@@ -1017,6 +1293,21 @@ fn render_runner_main(spec_paths: &[Vec<String>]) -> String {
     }
     output.push_str(
         "    let registrations = nirvash::collect_primary_spec_viz_provider_registrations();\n    let total_specs = registrations.len();\n    let progress_enabled = std::env::var_os(\"NIRVASH_DOCGEN_PROGRESS\").is_some();\n    let worker_count = std::env::var(\"NIRVASH_DOCGEN_JOBS\")\n        .ok()\n        .and_then(|value| value.parse::<usize>().ok())\n        .filter(|value| *value > 0)\n        .unwrap_or_else(|| thread::available_parallelism().map(|value| value.get()).unwrap_or(1))\n        .min(total_specs.max(1))\n        .min(4);\n    if progress_enabled {\n        eprintln!(\"nirvash-docgen starting {total_specs} spec(s) with {worker_count} worker(s)\");\n    }\n    let queue = Arc::new(Mutex::new(VecDeque::from(registrations)));\n    let (tx, rx) = mpsc::channel();\n    let mut workers = Vec::new();\n    for _ in 0..worker_count {\n        let queue = Arc::clone(&queue);\n        let tx = tx.clone();\n        workers.push(thread::spawn(move || {\n            loop {\n                let registration = {\n                    let mut queue = queue.lock().expect(\"lock doc graph queue\");\n                    queue.pop_front()\n                };\n                let Some(registration) = registration else {\n                    break;\n                };\n                let spec_name = registration.spec_name.to_owned();\n                let bundle = (registration.build)().bundle();\n                tx.send((spec_name, bundle)).expect(\"send doc graph bundle\");\n            }\n        }));\n    }\n    drop(tx);\n    let started_at = std::time::Instant::now();\n    let stdout = io::stdout();\n    let mut writer = io::BufWriter::new(stdout.lock());\n    let mut completed = 0usize;\n    for (spec_name, bundle) in rx {\n        completed += 1;\n        if progress_enabled {\n            eprintln!(\n                \"nirvash-docgen spec progress {completed}/{total_specs} after {:?}: {}\",\n                started_at.elapsed(),\n                spec_name,\n            );\n        }\n        serde_json::to_writer(&mut writer, &bundle).expect(\"serialize doc graph bundle\");\n        writer.write_all(b\"\\n\").expect(\"write doc graph bundle separator\");\n    }\n    for worker in workers {\n        worker.join().expect(\"join doc graph worker\");\n    }\n    writer.flush().expect(\"flush doc graph bundles\");\n}\n",
+    );
+    output
+}
+
+fn render_transition_doc_runner_main(spec_paths: &[Vec<String>]) -> String {
+    let mut output = String::from(
+        "extern crate doc_target;\n\nuse std::{collections::VecDeque, io::{self, Write}, sync::{mpsc, Arc, Mutex}, thread};\n\nfn main() {\n",
+    );
+    for path in spec_paths {
+        output.push_str("    ");
+        output.push_str(&render_link_call(path));
+        output.push('\n');
+    }
+    output.push_str(
+        "    let registrations = nirvash::collect_transition_doc_provider_registrations();\n    let total_specs = registrations.len();\n    let progress_enabled = std::env::var_os(\"NIRVASH_DOCGEN_PROGRESS\").is_some();\n    let worker_count = std::env::var(\"NIRVASH_DOCGEN_JOBS\")\n        .ok()\n        .and_then(|value| value.parse::<usize>().ok())\n        .filter(|value| *value > 0)\n        .unwrap_or_else(|| thread::available_parallelism().map(|value| value.get()).unwrap_or(1))\n        .min(total_specs.max(1))\n        .min(4);\n    if progress_enabled {\n        eprintln!(\"nirvash-docgen starting {total_specs} transition doc spec(s) with {worker_count} worker(s)\");\n    }\n    let queue = Arc::new(Mutex::new(VecDeque::from(registrations)));\n    let (tx, rx) = mpsc::channel();\n    let mut workers = Vec::new();\n    for _ in 0..worker_count {\n        let queue = Arc::clone(&queue);\n        let tx = tx.clone();\n        workers.push(thread::spawn(move || {\n            loop {\n                let registration = {\n                    let mut queue = queue.lock().expect(\"lock transition doc queue\");\n                    queue.pop_front()\n                };\n                let Some(registration) = registration else {\n                    break;\n                };\n                let spec_name = registration.spec_name.to_owned();\n                let bundle = (registration.build)().bundle();\n                tx.send((spec_name, bundle)).expect(\"send transition doc bundle\");\n            }\n        }));\n    }\n    drop(tx);\n    let started_at = std::time::Instant::now();\n    let stdout = io::stdout();\n    let mut writer = io::BufWriter::new(stdout.lock());\n    let mut completed = 0usize;\n    for (spec_name, bundle) in rx {\n        completed += 1;\n        if progress_enabled {\n            eprintln!(\n                \"nirvash-docgen transition doc progress {completed}/{total_specs} after {:?}: {}\",\n                started_at.elapsed(),\n                spec_name,\n            );\n        }\n        serde_json::to_writer(&mut writer, &bundle).expect(\"serialize transition doc bundle\");\n        writer.write_all(b\"\\n\").expect(\"write transition doc bundle separator\");\n    }\n    for worker in workers {\n        worker.join().expect(\"join transition doc worker\");\n    }\n    writer.flush().expect(\"flush transition doc bundles\");\n}\n",
     );
     output
 }
@@ -1498,6 +1789,435 @@ impl MermaidAliasMap {
             [(_, first_id), .., (_, last_id)] => format!("{first_id},{last_id}"),
         }
     }
+}
+
+fn render_transition_doc_fragment(bundle: &nirvash::TransitionDocBundle) -> String {
+    let mut output = String::new();
+    output.push_str("## Transition Program\n\n");
+    output.push_str(&render_transition_doc_metadata(bundle));
+    output.push_str("\n\n");
+    if bundle.structure_cases.is_empty() {
+        output.push_str("No transition program structure is available.\n");
+    } else {
+        for case in &bundle.structure_cases {
+            output.push_str(&format!("### {}\n\n", case.label));
+            output.push_str(&render_mermaid_block(
+                &render_transition_rule_graph_mermaid(case),
+            ));
+            output.push_str("\n\n");
+            output.push_str(&render_transition_structure_case_summary(case));
+            output.push_str("\n\n");
+        }
+    }
+
+    output.push_str("## Rule Catalog\n\n");
+    output.push_str(&render_transition_rule_catalog(bundle));
+    output.push_str("\n\n## Update Semantics\n\n");
+    output.push_str(&render_transition_update_semantics(bundle));
+    output.push_str("\n\n## Constraint Summary\n\n");
+    output.push_str(&render_transition_constraint_summary(bundle));
+    output.push_str("\n\n## Data Model\n\n");
+    output.push_str(&render_transition_data_model(bundle));
+    output.push_str("\n\n## Reachability\n\n");
+    output.push_str(&render_transition_reachability(bundle));
+    output.push_str("\n\n## Scenario Traces\n\n");
+    output.push_str(&render_transition_scenario_traces(bundle));
+    output.push('\n');
+    output.push_str(&mermaid_render_script());
+    output
+}
+
+fn render_transition_doc_metadata(bundle: &nirvash::TransitionDocBundle) -> String {
+    let kind = match bundle.metadata.kind {
+        Some(nirvash::SpecVizKind::System) => "system_spec",
+        Some(nirvash::SpecVizKind::Subsystem) => "subsystem_spec",
+        None => "unknown",
+    };
+    let mut output = format!(
+        "| field | value |\n| --- | --- |\n| spec | `{}` |\n| kind | `{}` |\n| spec id | `{}` |\n| state type | `{}` |\n| action type | `{}` |\n| model cases | `{}` |\n| reachability | `{}` |",
+        bundle.spec_name,
+        kind,
+        bundle.metadata.spec_id,
+        bundle.metadata.state_ty,
+        bundle.metadata.action_ty,
+        bundle.metadata.model_cases.as_deref().unwrap_or("default"),
+        bundle.metadata.reachability_mode.label(),
+    );
+    if !bundle.notes.is_empty() {
+        output.push_str("\n\n### Notes\n\n");
+        for note in &bundle.notes {
+            output.push_str(&format!("- {}\n", note));
+        }
+    }
+    output
+}
+
+fn render_transition_structure_case_summary(case: &nirvash::TransitionDocStructureCase) -> String {
+    let mut output = String::new();
+    output.push_str(&format!(
+        "| field | value |\n| --- | --- |\n| program | `{}` |\n| rules | `{}` |\n| action patterns | `{}` |\n| read paths | `{}` |\n| write paths | `{}` |",
+        case.program_name,
+        case.rules.len(),
+        list_or_none(&case.action_patterns),
+        list_or_none(&case.reads),
+        list_or_none(&case.writes),
+    ));
+    output
+}
+
+fn render_transition_rule_catalog(bundle: &nirvash::TransitionDocBundle) -> String {
+    if bundle.structure_cases.is_empty() {
+        return "No rules available.".to_owned();
+    }
+    let mut output = String::new();
+    for case in &bundle.structure_cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        output.push_str("| rule | actions | reads | writes | effects | deterministic |\n| --- | --- | --- | --- | --- | --- |\n");
+        for rule in &case.rules {
+            output.push_str(&format!(
+                "| `{}` | `{}` | `{}` | `{}` | `{}` | `{}` |\n",
+                rule.name,
+                list_or_none(&rule.action_patterns),
+                list_or_none(&rule.reads),
+                list_or_none(&rule.writes),
+                list_or_none(&rule.effects),
+                if rule.deterministic { "yes" } else { "no" },
+            ));
+        }
+        output.push('\n');
+    }
+    output.trim_end().to_owned()
+}
+
+fn render_transition_update_semantics(bundle: &nirvash::TransitionDocBundle) -> String {
+    if bundle.structure_cases.is_empty() {
+        return "No update semantics available.".to_owned();
+    }
+    let mut output = String::new();
+    for case in &bundle.structure_cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        for rule in &case.rules {
+            output.push_str(&format!(
+                "#### `{}`\n\n- guard: `{}`\n- update: `{}`\n",
+                rule.name, rule.guard, rule.update
+            ));
+            if !rule.effects.is_empty() {
+                output.push_str(&format!("- effects: `{}`\n", rule.effects.join("`, `")));
+            }
+            output.push('\n');
+        }
+    }
+    output.trim_end().to_owned()
+}
+
+fn render_transition_constraint_summary(bundle: &nirvash::TransitionDocBundle) -> String {
+    let registrations = &bundle.metadata.registrations;
+    let mut output = String::new();
+    render_named_block(&mut output, "invariants", &registrations.invariants);
+    render_named_block(&mut output, "properties", &registrations.properties);
+    render_named_block(&mut output, "fairness", &registrations.fairness);
+    render_named_block(
+        &mut output,
+        "state constraints",
+        &registrations.state_constraints,
+    );
+    render_named_block(
+        &mut output,
+        "action constraints",
+        &registrations.action_constraints,
+    );
+    render_named_block(&mut output, "symmetries", &registrations.symmetries);
+    output.trim_end().to_owned()
+}
+
+fn render_transition_data_model(bundle: &nirvash::TransitionDocBundle) -> String {
+    let mut output = format!(
+        "| field | value |\n| --- | --- |\n| state | `{}` |\n| action | `{}` |\n",
+        bundle.metadata.state_ty, bundle.metadata.action_ty
+    );
+    if !bundle.metadata.subsystems.is_empty() {
+        output.push_str("| subsystems | `");
+        output.push_str(
+            &bundle
+                .metadata
+                .subsystems
+                .iter()
+                .map(|subsystem| subsystem.label.as_str())
+                .collect::<Vec<_>>()
+                .join("`, `"),
+        );
+        output.push_str("` |\n");
+    }
+    if !bundle.structure_cases.is_empty() {
+        output.push_str("\n### Access Paths\n\n");
+        for case in &bundle.structure_cases {
+            output.push_str(&format!(
+                "- `{}` reads `{}` and writes `{}`\n",
+                case.label,
+                list_or_none(&case.reads),
+                list_or_none(&case.writes),
+            ));
+        }
+    }
+    output.trim_end().to_owned()
+}
+
+fn render_transition_reachability(bundle: &nirvash::TransitionDocBundle) -> String {
+    if bundle.reachability_cases.is_empty() {
+        let note = if bundle.notes.is_empty() {
+            "Structure-only documentation. Reachability graph was not generated.".to_owned()
+        } else {
+            bundle.notes.join(" ")
+        };
+        return format!("{note}\n");
+    }
+    let mut output = String::new();
+    for case in &bundle.reachability_cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        output.push_str(&format!(
+            "| field | value |\n| --- | --- |\n| backend | `{}` |\n| trust tier | `{}` |\n| surface | `{}` |\n| projection | `{}` |\n| states | `{}` |\n| transitions | `{}` |\n| deadlocks | `{}` |\n| truncated | `{}` |\n",
+            render_model_backend(case.backend),
+            render_trust_tier(case.trust_tier),
+            case.surface.as_deref().unwrap_or("default"),
+            case.projection.as_deref().unwrap_or("none"),
+            case.states.len(),
+            case.edges.iter().map(|edges| edges.len()).sum::<usize>(),
+            case.deadlocks.len(),
+            if case.truncated { "yes" } else { "no" },
+        ));
+        output.push('\n');
+        output.push_str(&render_mermaid_block(
+            &render_transition_reachability_mermaid(case),
+        ));
+        output.push_str("\n\n");
+    }
+    output.trim_end().to_owned()
+}
+
+fn render_transition_scenario_traces(bundle: &nirvash::TransitionDocBundle) -> String {
+    if bundle.reachability_cases.is_empty() {
+        return "No reachability traces were generated.".to_owned();
+    }
+    let mut output = String::new();
+    for case in &bundle.reachability_cases {
+        output.push_str(&format!("### {}\n\n", case.label));
+        let traces = representative_transition_doc_traces(case);
+        if traces.is_empty() {
+            output.push_str("No representative traces available.\n\n");
+            continue;
+        }
+        for (index, trace) in traces.iter().enumerate() {
+            output.push_str(&format!("#### trace-{}\n\n", index + 1));
+            output.push_str("| step | state | action |\n| --- | --- | --- |\n");
+            for step in trace {
+                output.push_str(&format!(
+                    "| {} | {} | {} |\n",
+                    step.step,
+                    markdown_table_code_cell(&step.state),
+                    markdown_table_code_cell(step.action.as_deref().unwrap_or("initial")),
+                ));
+            }
+            output.push('\n');
+        }
+    }
+    output.trim_end().to_owned()
+}
+
+fn render_transition_rule_graph_mermaid(case: &nirvash::TransitionDocStructureCase) -> String {
+    let mut output = String::from("flowchart LR\n");
+    output.push_str(&format!(
+        "%% transition program for {}::{}\n",
+        case.program_name, case.label
+    ));
+    for (rule_index, rule) in case.rules.iter().enumerate() {
+        let rule_id = format!("R{rule_index}");
+        output.push_str(&format!(
+            "{rule_id}[\"rule: {}\"]\n",
+            escape_mermaid_label(&rule.name)
+        ));
+        if rule.action_patterns.is_empty() {
+            output.push_str(&format!("A{rule_index}[\"action: any\"] --> {rule_id}\n"));
+        } else {
+            for (action_index, action) in rule.action_patterns.iter().enumerate() {
+                let action_id = format!("A{rule_index}_{action_index}");
+                output.push_str(&format!(
+                    "{action_id}[\"action: {}\"] --> {rule_id}\n",
+                    escape_mermaid_label(action)
+                ));
+            }
+        }
+        if rule.writes.is_empty() && rule.effects.is_empty() {
+            output.push_str(&format!("{} --> N{}[\"noop\"]\n", rule_id, rule_index));
+        }
+        for (write_index, write) in rule.writes.iter().enumerate() {
+            output.push_str(&format!(
+                "{rule_id} --> W{rule_index}_{write_index}[\"write: {}\"]\n",
+                escape_mermaid_label(write)
+            ));
+        }
+        for (effect_index, effect) in rule.effects.iter().enumerate() {
+            output.push_str(&format!(
+                "{rule_id} --> E{rule_index}_{effect_index}[\"effect: {}\"]\n",
+                escape_mermaid_label(effect)
+            ));
+        }
+    }
+    output
+}
+
+fn render_transition_reachability_mermaid(case: &nirvash::TransitionDocReachabilityCase) -> String {
+    let mut output = String::from("stateDiagram-v2\n");
+    output.push_str(&format!("%% reachable graph for {}\n", case.label));
+    for (index, state) in case.states.iter().enumerate() {
+        output.push_str(&format!(
+            "state \"{}\" as S{}\n",
+            mermaid_state_label(&state.summary),
+            index
+        ));
+    }
+    for index in &case.initial_indices {
+        output.push_str(&format!("[*] --> S{}\n", index));
+    }
+    if !case.deadlocks.is_empty() {
+        output.push_str(
+            "classDef deadlock fill:#fee2e2,stroke:#b91c1c,stroke-width:3px,color:#7f1d1d;\n",
+        );
+        output.push_str(&format!(
+            "class {} deadlock\n",
+            case.deadlocks
+                .iter()
+                .map(|index| format!("S{index}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+    }
+    for (source, edges) in case.edges.iter().enumerate() {
+        for edge in edges {
+            output.push_str(&format!(
+                "S{} --> S{}: {}\n",
+                source,
+                edge.target,
+                state_diagram_edge_label(edge.compact_label.as_deref().unwrap_or(&edge.label))
+            ));
+        }
+    }
+    output
+}
+
+fn render_trust_tier(trust_tier: nirvash::TrustTier) -> &'static str {
+    match trust_tier {
+        nirvash::TrustTier::Exact => "exact",
+        nirvash::TrustTier::CertifiedReduction => "certified_reduction",
+        nirvash::TrustTier::ClaimedReduction => "claimed_reduction",
+        nirvash::TrustTier::Heuristic => "heuristic",
+    }
+}
+
+fn list_or_none(values: &[String]) -> String {
+    if values.is_empty() {
+        "none".to_owned()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn markdown_table_code_cell(value: &str) -> String {
+    let normalized = value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" / ");
+    let escaped = normalized
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('|', "&#124;");
+    format!("<code>{escaped}</code>")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransitionTraceRow {
+    step: usize,
+    state: String,
+    action: Option<String>,
+}
+
+fn representative_transition_doc_traces(
+    case: &nirvash::TransitionDocReachabilityCase,
+) -> Vec<Vec<TransitionTraceRow>> {
+    let predecessors = shortest_transition_doc_paths(case);
+    let mut targets = case.deadlocks.clone();
+    if targets.is_empty() && !case.states.is_empty() {
+        targets.push(case.states.len() - 1);
+    }
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+        .into_iter()
+        .take(3)
+        .filter_map(|target| render_transition_trace_rows(case, &predecessors, target))
+        .collect()
+}
+
+fn shortest_transition_doc_paths(
+    case: &nirvash::TransitionDocReachabilityCase,
+) -> Vec<Option<(usize, String)>> {
+    let mut predecessors = vec![None; case.states.len()];
+    let mut queue = std::collections::VecDeque::new();
+    for &initial in &case.initial_indices {
+        if initial < case.states.len() {
+            queue.push_back(initial);
+        }
+    }
+    while let Some(source) = queue.pop_front() {
+        for edge in &case.edges[source] {
+            if edge.target >= predecessors.len() {
+                continue;
+            }
+            if predecessors[edge.target].is_none() && !case.initial_indices.contains(&edge.target) {
+                predecessors[edge.target] = Some((
+                    source,
+                    edge.compact_label
+                        .clone()
+                        .unwrap_or_else(|| edge.label.clone()),
+                ));
+                queue.push_back(edge.target);
+            }
+        }
+    }
+    predecessors
+}
+
+fn render_transition_trace_rows(
+    case: &nirvash::TransitionDocReachabilityCase,
+    predecessors: &[Option<(usize, String)>],
+    target: usize,
+) -> Option<Vec<TransitionTraceRow>> {
+    if target >= case.states.len() {
+        return None;
+    }
+    let mut path = vec![target];
+    let mut cursor = target;
+    let mut actions = Vec::new();
+    while let Some((previous, action)) = predecessors.get(cursor).and_then(|value| value.clone()) {
+        actions.push(action);
+        path.push(previous);
+        cursor = previous;
+    }
+    path.reverse();
+    actions.reverse();
+    let mut rows = Vec::new();
+    for (index, state_index) in path.into_iter().enumerate() {
+        rows.push(TransitionTraceRow {
+            step: index,
+            state: case.states[state_index].summary.clone(),
+            action: index
+                .checked_sub(1)
+                .and_then(|action_index| actions.get(action_index).cloned()),
+        });
+    }
+    Some(rows)
 }
 
 #[cfg(test)]
@@ -3098,6 +3818,80 @@ mod tests {
         )
     }
 
+    fn demo_transition_bundle() -> nirvash::TransitionDocBundle {
+        nirvash::TransitionDocBundle {
+            spec_name: "DemoTransitionSpec".to_owned(),
+            metadata: nirvash::TransitionDocMetadata {
+                spec_id: "crate::demo::DemoTransitionSpec".to_owned(),
+                kind: Some(nirvash::SpecVizKind::Subsystem),
+                state_ty: "DemoState".to_owned(),
+                action_ty: "DemoAction".to_owned(),
+                model_cases: Some("demo_cases".to_owned()),
+                subsystems: Vec::new(),
+                registrations: nirvash::SpecVizRegistrationSet {
+                    invariants: vec!["always_valid".to_owned()],
+                    properties: Vec::new(),
+                    fairness: Vec::new(),
+                    state_constraints: vec!["legal_state".to_owned()],
+                    action_constraints: vec!["legal_step".to_owned()],
+                    symmetries: Vec::new(),
+                },
+                reachability_mode: nirvash::TransitionDocReachabilityMode::AutoIfFinite,
+            },
+            structure_cases: vec![nirvash::TransitionDocStructureCase {
+                label: "default".to_owned(),
+                program_name: "demo_program".to_owned(),
+                action_patterns: vec!["DemoAction::Start".to_owned()],
+                reads: vec!["prev.busy".to_owned()],
+                writes: vec!["busy".to_owned()],
+                rules: vec![nirvash::TransitionDocRule {
+                    name: "start".to_owned(),
+                    action_patterns: vec!["DemoAction::Start".to_owned()],
+                    guard: "action matches DemoAction::Start".to_owned(),
+                    update: "set busy <= true".to_owned(),
+                    reads: vec!["prev.busy".to_owned()],
+                    writes: vec!["busy".to_owned()],
+                    effects: vec!["emit_started".to_owned()],
+                    deterministic: true,
+                }],
+            }],
+            reachability_cases: vec![nirvash::TransitionDocReachabilityCase {
+                label: "focused".to_owned(),
+                backend: nirvash::ModelBackend::Explicit,
+                trust_tier: nirvash::TrustTier::Exact,
+                surface: Some("demo".to_owned()),
+                projection: None,
+                states: vec![
+                    nirvash::TransitionDocStateNode {
+                        summary: "busy: false".to_owned(),
+                        full: "busy: false".to_owned(),
+                        relation_fields: Vec::new(),
+                        relation_schema: Vec::new(),
+                    },
+                    nirvash::TransitionDocStateNode {
+                        summary: "busy: true".to_owned(),
+                        full: "busy: true".to_owned(),
+                        relation_fields: Vec::new(),
+                        relation_schema: Vec::new(),
+                    },
+                ],
+                edges: vec![
+                    vec![nirvash::TransitionDocStateEdge {
+                        label: "Start demo".to_owned(),
+                        compact_label: Some("start".to_owned()),
+                        target: 1,
+                    }],
+                    Vec::new(),
+                ],
+                initial_indices: vec![0],
+                deadlocks: vec![1],
+                truncated: false,
+                stutter_omitted: false,
+            }],
+            notes: vec!["Reachability is available because the state domain is finite.".to_owned()],
+        }
+    }
+
     #[test]
     fn render_runner_main_uses_parallel_bundle_workers() {
         let main = render_runner_main(&[
@@ -3122,6 +3916,38 @@ mod tests {
         assert!(main.contains("nirvash-docgen spec progress"));
         assert!(main.contains("serde_json::to_writer"));
         assert!(!main.contains("collect_spec_viz_bundles()"));
+    }
+
+    #[test]
+    fn render_transition_doc_fragment_prioritizes_structure_and_reachability_sections() {
+        let fragment = render_transition_doc_fragment(&demo_transition_bundle());
+        assert!(fragment.contains("## Transition Program"));
+        assert!(fragment.contains("## Rule Catalog"));
+        assert!(fragment.contains("## Update Semantics"));
+        assert!(fragment.contains("## Reachability"));
+        assert!(fragment.contains("## Scenario Traces"));
+        assert!(fragment.contains("flowchart LR"));
+        assert!(fragment.contains("stateDiagram-v2"));
+        assert!(fragment.contains("write: busy"));
+        assert!(fragment.contains("Reachability is available because the state domain is finite."));
+    }
+
+    #[test]
+    fn render_transition_scenario_traces_normalizes_multiline_table_cells() {
+        let mut bundle = demo_transition_bundle();
+        bundle.reachability_cases[0].states[0].summary =
+            "StackState {\n  busy: false,\n  note: Ready | waiting,\n}".to_owned();
+        bundle.reachability_cases[0].edges[0][0].compact_label = Some("start | demo".to_owned());
+
+        let fragment = render_transition_scenario_traces(&bundle);
+
+        assert!(fragment.contains(
+            "| 0 | <code>StackState { / busy: false, / note: Ready &#124; waiting, / }</code> | <code>initial</code> |"
+        ));
+        assert!(
+            fragment.contains("| 1 | <code>busy: true</code> | <code>start &#124; demo</code> |")
+        );
+        assert!(!fragment.contains("StackState {\n"));
     }
 
     #[test]
@@ -3465,6 +4291,101 @@ fn system_model_cases() -> Vec<nirvash_lower::ModelInstance<SystemState, SystemA
         let second_inline_doc =
             fs::read_to_string(&second_inline_fragment.path).expect("second inline doc");
         assert_eq!(second_inline_doc, inline_doc);
+    }
+
+    #[test]
+    fn generate_prefers_transition_doc_bundles_without_formal_tests() {
+        let dir = tempdir().expect("tempdir");
+        let manifest_dir = dir.path();
+        let src_dir = manifest_dir.join("src");
+        let out_dir = manifest_dir.join("out");
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root")
+            .to_path_buf();
+        fs::create_dir_all(&src_dir).expect("src");
+        fs::write(
+            manifest_dir.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"demo-transition-doc-target\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\nnirvash = {{ path = \"{}\" }}\nnirvash-lower = {{ path = \"{}\" }}\nnirvash-macros = {{ path = \"{}\" }}\n",
+                workspace_root.join("crates/nirvash").display(),
+                workspace_root.join("crates/nirvash-lower").display(),
+                workspace_root.join("crates/nirvash-macros").display(),
+            ),
+        )
+        .expect("Cargo.toml");
+
+        fs::write(
+            src_dir.join("lib.rs"),
+            r#"
+use nirvash::TransitionProgram;
+use nirvash_lower::{FrontendSpec, ModelInstance};
+use nirvash_macros::{
+    FiniteModelDomain as FormalFiniteModelDomain, doc_case, doc_spec,
+    nirvash_transition_program, subsystem_spec,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
+pub struct DocState {
+    busy: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, FormalFiniteModelDomain)]
+pub enum DocAction {
+    Start,
+}
+
+#[derive(Default)]
+pub struct TransitionDocSpec;
+
+#[doc_spec]
+#[subsystem_spec]
+impl FrontendSpec for TransitionDocSpec {
+    type State = DocState;
+    type Action = DocAction;
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        vec![DocState { busy: false }]
+    }
+
+    fn actions(&self) -> Vec<Self::Action> {
+        vec![DocAction::Start]
+    }
+
+    fn transition_program(&self) -> Option<TransitionProgram<Self::State, Self::Action>> {
+        Some(nirvash_transition_program! {
+            rule start when matches!(action, DocAction::Start) && !prev.busy => {
+                set busy <= true;
+            }
+        })
+    }
+}
+
+#[doc_case(spec = TransitionDocSpec)]
+fn focused_doc_case() -> ModelInstance<DocState, DocAction> {
+    ModelInstance::new("focused")
+}
+"#,
+        )
+        .expect("lib.rs");
+
+        let output = generate_at(manifest_dir, &out_dir).expect("docgen succeeds");
+        let fragment = output
+            .fragments
+            .iter()
+            .find(|fragment| fragment.env_key == "NIRVASH_DOC_FRAGMENT_TRANSITION_DOC_SPEC")
+            .expect("transition doc fragment");
+        let doc = fs::read_to_string(&fragment.path).expect("fragment");
+        assert!(doc.contains("## Transition Program"));
+        assert!(doc.contains("## Reachability"));
+        assert!(doc.contains("flowchart LR"));
+        assert!(doc.contains("stateDiagram-v2"));
+
+        let viz = fs::read_to_string(out_dir.join("viz/TransitionDocSpec.json")).expect("viz");
+        assert!(viz.contains("\"structure_cases\""));
+        assert!(viz.contains("\"reachability_cases\""));
+        assert!(!viz.contains("\"cases\": []"));
     }
 
     #[test]

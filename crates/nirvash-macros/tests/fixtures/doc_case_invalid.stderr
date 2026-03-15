@@ -1,0 +1,5 @@
+error: doc case functions must not take parameters
+  --> tests/fixtures/doc_case_invalid.rs:48:17
+   |
+48 | fn invalid_case(_unexpected: u8) -> nirvash_lower::ModelInstance<State, Action> {
+   |                 ^^^^^^^^^^^

@@ -34,6 +34,8 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/code_tests_low_level_nested_installer_ok.rs");
     t.pass("tests/fixtures/code_tests_same_tail_specs_ok.rs");
     t.pass("tests/fixtures/code_tests_kani_harness_ok.rs");
+    t.pass("tests/fixtures/doc_spec_ok.rs");
+    t.pass("tests/fixtures/doc_case_ok.rs");
     t.pass("tests/fixtures/derive_protocol_input_witness_ok.rs");
     t.pass("tests/fixtures/function_like_bool_macros_ok.rs");
     t.pass("tests/fixtures/function_like_transition_program_ok.rs");
@@ -64,6 +66,7 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.compile_fail("tests/fixtures/registered_invariant_closure_reject.rs");
     t.compile_fail("tests/fixtures/registered_transition_program_closure_reject.rs");
     t.compile_fail("tests/fixtures/registered_property_closure_reject.rs");
+    t.compile_fail("tests/fixtures/doc_case_invalid.rs");
     unsafe {
         std::env::remove_var("NIRVASH_DOC_FRAGMENT_SPEC");
     }

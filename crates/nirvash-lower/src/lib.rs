@@ -3369,6 +3369,43 @@ pub mod registry {
         matched.into_iter().next().map(|(name, _)| name.to_owned())
     }
 
+    pub fn collect_doc_cases_for<Spec, State, Action>() -> Vec<ModelInstance<State, Action>>
+    where
+        Spec: 'static,
+        State: 'static,
+        Action: 'static,
+    {
+        let spec_name = type_name::<Spec>();
+        let spec_type_id = TypeId::of::<Spec>();
+        let mut matched = nirvash::inventory::iter::<nirvash::RegisteredTransitionDocCase>
+            .into_iter()
+            .filter(|entry| (entry.spec_type_id)() == spec_type_id)
+            .collect::<Vec<_>>();
+        matched.sort_by_key(|entry| entry.name);
+
+        let mut seen = BTreeSet::new();
+        for entry in &matched {
+            if !seen.insert(entry.name) {
+                panic!(
+                    "duplicate doc case registration `{}` for spec `{spec_name}`",
+                    entry.name
+                );
+            }
+        }
+
+        matched
+            .into_iter()
+            .map(|entry| {
+                downcast_registered::<ModelInstance<State, Action>>(
+                    (entry.build)(),
+                    spec_name,
+                    "doc case",
+                    entry.name,
+                )
+            })
+            .collect()
+    }
+
     pub fn apply_registered_model_case_metadata_for<Spec, State, Action>(
         model_instances: &mut Vec<ModelInstance<State, Action>>,
     ) where

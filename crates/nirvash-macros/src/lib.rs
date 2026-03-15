@@ -113,6 +113,26 @@ pub fn formal_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
+pub fn doc_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as DocSpecArgs);
+    let item = parse_macro_input!(item as ItemImpl);
+    match expand_doc_spec(args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
+pub fn doc_case(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(attr as DocCaseArgs);
+    let item = parse_macro_input!(item as ItemFn);
+    match expand_doc_case(args, item) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+#[proc_macro_attribute]
 pub fn code_tests(attr: TokenStream, item: TokenStream) -> TokenStream {
     match codegen::expand_code_tests(attr, item) {
         Ok(tokens) => tokens.into(),
@@ -1810,6 +1830,70 @@ impl syn::parse::Parse for SpecArgs {
     }
 }
 
+struct DocSpecArgs {
+    cases: Option<Path>,
+    reachability: TransitionDocReachabilityArg,
+}
+
+impl syn::parse::Parse for DocSpecArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut args = Self {
+            cases: None,
+            reachability: TransitionDocReachabilityArg::AutoIfFinite,
+        };
+
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            let content;
+            syn::parenthesized!(content in input);
+            match ident.to_string().as_str() {
+                "cases" => args.cases = Some(parse_single_path(&content)?),
+                "reachability" => args.reachability = content.parse()?,
+                _ => return Err(syn::Error::new(ident.span(), "unsupported macro argument")),
+            }
+            if input.peek(syn::Token![,]) {
+                let _ = input.parse::<syn::Token![,]>()?;
+            }
+        }
+
+        Ok(args)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TransitionDocReachabilityArg {
+    Always,
+    Never,
+    AutoIfFinite,
+}
+
+impl TransitionDocReachabilityArg {
+    fn tokens(self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Always => quote! { ::nirvash::TransitionDocReachabilityMode::Always },
+            Self::Never => quote! { ::nirvash::TransitionDocReachabilityMode::Never },
+            Self::AutoIfFinite => {
+                quote! { ::nirvash::TransitionDocReachabilityMode::AutoIfFinite }
+            }
+        }
+    }
+}
+
+impl Parse for TransitionDocReachabilityArg {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let ident: Ident = input.parse()?;
+        match ident.to_string().as_str() {
+            "always" => Ok(Self::Always),
+            "never" => Ok(Self::Never),
+            "auto_if_finite" => Ok(Self::AutoIfFinite),
+            _ => Err(syn::Error::new(
+                ident.span(),
+                "reachability(...) must be one of always, never, auto_if_finite",
+            )),
+        }
+    }
+}
+
 struct TestArgs {
     spec: Path,
     cases: Option<Ident>,
@@ -1845,6 +1929,30 @@ impl syn::parse::Parse for TestArgs {
             spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
             cases,
             composition,
+        })
+    }
+}
+
+struct DocCaseArgs {
+    spec: Path,
+}
+
+impl syn::parse::Parse for DocCaseArgs {
+    fn parse(input: syn::parse::ParseStream<'_>) -> syn::Result<Self> {
+        let mut spec = None;
+        while !input.is_empty() {
+            let ident: Ident = input.parse()?;
+            let _eq: syn::Token![=] = input.parse()?;
+            match ident.to_string().as_str() {
+                "spec" => spec = Some(input.parse()?),
+                _ => return Err(syn::Error::new(ident.span(), "unsupported doc_case argument")),
+            }
+            if input.peek(syn::Token![,]) {
+                let _ = input.parse::<syn::Token![,]>()?;
+            }
+        }
+        Ok(Self {
+            spec: spec.ok_or_else(|| syn::Error::new(Span::call_site(), "missing spec = ..."))?,
         })
     }
 }
@@ -4504,6 +4612,428 @@ fn expand_temporal_spec(
         }
 
         #composition_impl
+    })
+}
+
+fn expand_doc_spec(args: DocSpecArgs, item: ItemImpl) -> syn::Result<proc_macro2::TokenStream> {
+    let self_ty = (*item.self_ty).clone();
+    let spec_path = match &self_ty {
+        Type::Path(type_path) if type_path.qself.is_none() => type_path.path.clone(),
+        _ => {
+            return Err(syn::Error::new(
+                self_ty.span(),
+                "#[doc_spec] requires a simple path type",
+            ));
+        }
+    };
+    let spec_tail = path_tail_ident(&spec_path)?.clone();
+    let spec_name = LitStr::new(&spec_tail.to_string(), spec_tail.span());
+    let state_ty = associated_type(&item, "State")?;
+    let action_ty = associated_type(&item, "Action")?;
+    let Some(transition_program_fn) = impl_method(&item, "transition_program") else {
+        return Err(syn::Error::new(
+            self_ty.span(),
+            "#[doc_spec] requires fn transition_program(&self) -> Option<TransitionProgram<...>>",
+        ));
+    };
+    if let Some(message) = ast_native_transition_program_builder_error(transition_program_fn) {
+        return Err(syn::Error::new(transition_program_fn.block.span(), message));
+    }
+
+    let provider_ident = format_ident!("__NirvashTransitionDocProvider{}", spec_tail);
+    let provider_build_ident = format_ident!(
+        "__nirvash_transition_doc_provider_build_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let spec_type_id_ident = format_ident!(
+        "__nirvash_transition_doc_spec_type_id_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let spec_cases_build_ident = format_ident!(
+        "__nirvash_transition_doc_spec_cases_{}",
+        spec_tail.to_string().to_lowercase()
+    );
+    let reachability_mode = args.reachability.tokens();
+    let build_cases_item = args.cases.as_ref().map(|cases_path| {
+        guard_item(quote! {
+            #[doc(hidden)]
+            fn #spec_cases_build_ident() -> ::std::boxed::Box<dyn ::std::any::Any> {
+                ::std::boxed::Box::new(#cases_path())
+            }
+        })
+    });
+    let build_cases_field = if args.cases.is_some() {
+        quote! { ::std::option::Option::Some(#spec_cases_build_ident) }
+    } else {
+        quote! { ::std::option::Option::None }
+    };
+    let default_cases_expr = if args.cases.is_some() {
+        quote! {
+            ::nirvash::transition_doc_spec_cases_for::<#self_ty>()
+                .unwrap_or_else(|| ::std::vec::Vec::new())
+        }
+    } else {
+        quote! {
+            ::nirvash::transition_doc_spec_cases_for::<#self_ty>()
+                .unwrap_or_else(|| vec![<#self_ty as ::core::default::Default>::default()])
+        }
+    };
+
+    let spec_type_id_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #spec_type_id_ident() -> ::std::any::TypeId {
+            ::std::any::TypeId::of::<#self_ty>()
+        }
+    });
+    let provider_item = guard_item(quote! {
+        #[doc(hidden)]
+        struct #provider_ident;
+    });
+    let provider_impl_item = guard_item(quote! {
+        impl ::nirvash::TransitionDocProvider for #provider_ident {
+            fn spec_name(&self) -> &'static str {
+                #spec_name
+            }
+
+            fn bundle(&self) -> ::nirvash::TransitionDocBundle {
+                let reachability_mode = ::nirvash::transition_doc_reachability_mode_for::<#self_ty>();
+                let specs: ::std::vec::Vec<#self_ty> = #default_cases_expr;
+                let multiple_specs = specs.len() > 1;
+                let mut structure_cases = ::std::vec::Vec::new();
+                let mut reachability_cases = ::std::vec::Vec::new();
+                let mut notes = ::std::vec::Vec::new();
+
+                for (spec_index, spec) in specs.into_iter().enumerate() {
+                    let structure_label = if multiple_specs {
+                        format!("case-{spec_index}")
+                    } else {
+                        "default".to_owned()
+                    };
+                    let mut lowering_cx = ::nirvash_lower::LoweringCx;
+                    let lowered =
+                        <#self_ty as ::nirvash_lower::FrontendSpec>::lower(&spec, &mut lowering_cx)
+                            .expect("spec should lower for transition docs");
+                    let Some(program) = lowered.transition_program() else {
+                        notes.push(format!(
+                            "Transition program is unavailable for `{}`.",
+                            structure_label
+                        ));
+                        continue;
+                    };
+                    structure_cases.push(::nirvash::build_transition_doc_structure_case(
+                        structure_label.clone(),
+                        &program,
+                    ));
+
+                    let mut doc_cases =
+                        ::nirvash_lower::registry::collect_doc_cases_for::<#self_ty, #state_ty, #action_ty>();
+                    let has_registered_doc_cases = !doc_cases.is_empty();
+                    if doc_cases.is_empty() {
+                        doc_cases = lowered.model_instances();
+                    }
+                    ::nirvash_lower::registry::apply_registered_model_case_metadata_for::<
+                        #self_ty,
+                        #state_ty,
+                        #action_ty,
+                    >(&mut doc_cases);
+                    let multiple_model_cases = doc_cases.len() > 1;
+
+                    let finite_reachability_available =
+                        ::nirvash::has_registered_finite_domain::<#state_ty>();
+                    let include_reachability = match reachability_mode {
+                        ::nirvash::TransitionDocReachabilityMode::Always => true,
+                        ::nirvash::TransitionDocReachabilityMode::Never => false,
+                        ::nirvash::TransitionDocReachabilityMode::AutoIfFinite => {
+                            finite_reachability_available
+                        }
+                    };
+                    if !include_reachability {
+                        notes.push(format!(
+                            "Reachability omitted for `{}` because `State` is not registered as a finite domain.",
+                            structure_label
+                        ));
+                        continue;
+                    }
+
+                    for model_case in doc_cases {
+                        let resolved_model_case = model_case.clone().with_resolved_backend(
+                            lowered
+                                .default_model_backend()
+                                .unwrap_or(::nirvash::ModelBackend::Explicit),
+                        );
+                        let backend = resolved_model_case
+                            .doc_checker_config()
+                            .and_then(|config| config.backend)
+                            .unwrap_or_else(|| {
+                                resolved_model_case
+                                    .effective_checker_config()
+                                    .backend
+                                    .unwrap_or(
+                                        lowered
+                                            .default_model_backend()
+                                            .unwrap_or(::nirvash::ModelBackend::Explicit),
+                                    )
+                            });
+                        let reachability_label = match (multiple_specs, multiple_model_cases) {
+                            (false, false) => {
+                                if has_registered_doc_cases {
+                                    resolved_model_case.label().to_owned()
+                                } else {
+                                    structure_label.clone()
+                                }
+                            }
+                            (false, true) => resolved_model_case.label().to_owned(),
+                            (true, false) => structure_label.clone(),
+                            (true, true) => {
+                                format!("{}/{}", structure_label, resolved_model_case.label())
+                            }
+                        };
+                        let projection = resolved_model_case
+                            .doc_state_projection()
+                            .map(|projection| projection.label.to_owned());
+                        let surface = resolved_model_case
+                            .doc_surface()
+                            .map(::std::borrow::ToOwned::to_owned);
+                        let checker_config = resolved_model_case
+                            .doc_checker_config()
+                            .unwrap_or_else(|| resolved_model_case.effective_checker_config());
+                        let actions = spec.actions();
+                        let initial_states = spec
+                            .initial_states()
+                            .into_iter()
+                            .filter(|state| {
+                                resolved_model_case
+                                    .state_constraints()
+                                    .iter()
+                                    .all(|constraint| constraint.eval(state))
+                            })
+                            .fold(::std::vec::Vec::<#state_ty>::new(), |mut states, state| {
+                                if !states.contains(&state) {
+                                    states.push(state);
+                                }
+                                states
+                            });
+                        let mut states = initial_states.clone();
+                        let mut edges = vec![::std::vec::Vec::<::nirvash::ReachableGraphEdge<#action_ty>>::new(); states.len()];
+                        let initial_indices = (0..states.len()).collect::<::std::vec::Vec<_>>();
+                        let mut queue = ::std::collections::VecDeque::from(initial_indices.clone());
+                        let mut deadlocks = ::std::vec::Vec::new();
+                        let mut truncated = false;
+                        let mut transition_count = 0usize;
+                        while let ::std::option::Option::Some(state_index) = queue.pop_front() {
+                            let prev = states[state_index].clone();
+                            let mut outgoing = ::std::vec::Vec::<::nirvash::ReachableGraphEdge<#action_ty>>::new();
+                            for action in &actions {
+                                let next_states = spec
+                                    .transition_relation(&prev, action)
+                                    .into_iter()
+                                    .filter(|next| {
+                                        resolved_model_case
+                                            .state_constraints()
+                                            .iter()
+                                            .all(|constraint| constraint.eval(next))
+                                            && resolved_model_case
+                                                .action_constraints()
+                                                .iter()
+                                                .all(|constraint| constraint.eval(&prev, action, next))
+                                    })
+                                    .collect::<::std::vec::Vec<_>>();
+                                for next in next_states {
+                                    if checker_config
+                                        .max_transitions
+                                        .is_some_and(|max_transitions| transition_count >= max_transitions)
+                                    {
+                                        truncated = true;
+                                        break;
+                                    }
+                                    let target = if let ::std::option::Option::Some(existing) =
+                                        states.iter().position(|state| state == &next)
+                                    {
+                                        existing
+                                    } else {
+                                        if checker_config
+                                            .max_states
+                                            .is_some_and(|max_states| states.len() >= max_states)
+                                        {
+                                            truncated = true;
+                                            break;
+                                        }
+                                        states.push(next.clone());
+                                        edges.push(::std::vec::Vec::new());
+                                        let new_index = states.len() - 1;
+                                        queue.push_back(new_index);
+                                        new_index
+                                    };
+                                    let edge = ::nirvash::ReachableGraphEdge {
+                                        action: action.clone(),
+                                        target,
+                                    };
+                                    if !outgoing.contains(&edge) {
+                                        outgoing.push(edge);
+                                        transition_count += 1;
+                                    }
+                                }
+                                if truncated {
+                                    break;
+                                }
+                            }
+                            if outgoing.is_empty() && resolved_model_case.check_deadlocks() {
+                                deadlocks.push(state_index);
+                            }
+                            edges[state_index] = outgoing;
+                            if truncated {
+                                break;
+                            }
+                        }
+                        let snapshot = ::nirvash::ReachableGraphSnapshot {
+                            states,
+                            edges,
+                            initial_indices,
+                            deadlocks,
+                            truncated,
+                            stutter_omitted: false,
+                            trust_tier: resolved_model_case.trust_tier(),
+                        };
+                        reachability_cases.push(::nirvash::build_transition_doc_reachability_case(
+                            reachability_label,
+                            surface,
+                            projection,
+                            backend,
+                            snapshot,
+                            |state| {
+                                resolved_model_case
+                                    .doc_state_projection()
+                                    .map(|projection| projection.summarize(state))
+                                    .unwrap_or_else(|| ::nirvash::summarize_doc_graph_state(state))
+                            },
+                            |action| ::nirvash::describe_doc_graph_action(action),
+                        ));
+                    }
+                }
+
+                ::nirvash::TransitionDocBundle {
+                    spec_name: #spec_name.to_owned(),
+                    metadata: ::nirvash::TransitionDocMetadata {
+                        spec_id: ::core::stringify!(#self_ty).to_owned(),
+                        kind: ::std::option::Option::Some(<#self_ty>::spec_kind()),
+                        state_ty: ::std::any::type_name::<#state_ty>().to_owned(),
+                        action_ty: ::std::any::type_name::<#action_ty>().to_owned(),
+                        model_cases: <#self_ty>::model_cases_name().map(|name| name.to_owned()),
+                        subsystems: <#self_ty>::registered_subsystems()
+                            .iter()
+                            .map(|subsystem| ::nirvash::SpecVizSubsystem::from_registered(*subsystem))
+                            .collect::<::std::vec::Vec<_>>(),
+                        registrations: ::nirvash_lower::registry::collect_spec_viz_registrations_for::<#self_ty, #state_ty, #action_ty>(),
+                        reachability_mode,
+                    },
+                    structure_cases,
+                    reachability_cases,
+                    notes,
+                }
+            }
+        }
+    });
+    let provider_build_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #provider_build_ident() -> ::std::boxed::Box<dyn ::nirvash::TransitionDocProvider> {
+            ::std::boxed::Box::new(#provider_ident)
+        }
+    });
+    let config_inventory_item = guard_item(quote! {
+        ::nirvash::inventory::submit! {
+            ::nirvash::RegisteredTransitionDocSpecConfig {
+                spec_type_id: #spec_type_id_ident,
+                reachability_mode: #reachability_mode,
+                build_cases: #build_cases_field,
+            }
+        }
+    });
+
+    let provider_inventory_item = guard_item(quote! {
+        ::nirvash::inventory::submit! {
+            ::nirvash::RegisteredTransitionDocProvider {
+                spec_name: #spec_name,
+                build: #provider_build_ident,
+            }
+        }
+    });
+
+    Ok(quote! {
+        #item
+
+        #spec_type_id_item
+        #build_cases_item
+        #provider_item
+        #provider_impl_item
+        #provider_build_item
+        #config_inventory_item
+        #provider_inventory_item
+    })
+}
+
+fn expand_doc_case(args: DocCaseArgs, item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    if !item.sig.inputs.is_empty() {
+        return Err(syn::Error::new(
+            item.sig.inputs.span(),
+            "doc case functions must not take parameters",
+        ));
+    }
+    if !item.sig.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            item.sig.generics.span(),
+            "doc case functions must not be generic",
+        ));
+    }
+
+    let fn_ident = item.sig.ident.clone();
+    let spec = args.spec;
+    let spec_tail = path_tail_ident(&spec)?.clone();
+    let build_ident = format_ident!(
+        "__nirvash_doc_case_build_{}_{}",
+        spec_tail.to_string().to_lowercase(),
+        fn_ident
+    );
+    let spec_type_id_ident = format_ident!(
+        "__nirvash_doc_case_spec_type_id_{}_{}",
+        spec_tail.to_string().to_lowercase(),
+        fn_ident
+    );
+    let expected = quote! {
+        ::nirvash_lower::ModelInstance<
+            <#spec as ::nirvash_lower::FrontendSpec>::State,
+            <#spec as ::nirvash_lower::FrontendSpec>::Action,
+        >
+    };
+
+    let spec_type_id_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #spec_type_id_ident() -> ::std::any::TypeId {
+            ::std::any::TypeId::of::<#spec>()
+        }
+    });
+    let build_item = guard_item(quote! {
+        #[doc(hidden)]
+        fn #build_ident() -> ::std::boxed::Box<dyn ::std::any::Any> {
+            ::std::boxed::Box::new(#fn_ident())
+        }
+    });
+    let inventory_item = guard_item(quote! {
+        ::nirvash::inventory::submit! {
+            ::nirvash::RegisteredTransitionDocCase {
+                spec_type_id: #spec_type_id_ident,
+                name: stringify!(#fn_ident),
+                build: #build_ident,
+            }
+        }
+    });
+
+    Ok(quote! {
+        #item
+
+        const _: fn() -> #expected = #fn_ident;
+        #spec_type_id_item
+        #build_item
+        #inventory_item
     })
 }
 

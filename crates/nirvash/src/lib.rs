@@ -8,6 +8,7 @@ mod predicate;
 pub mod registry;
 mod relation;
 mod trace;
+mod transition_doc;
 mod update_helpers;
 
 pub use action_vocabulary::ActionVocabulary;
@@ -62,4 +63,14 @@ pub use relation::{
     collect_relational_state_schema, collect_relational_state_summary,
 };
 pub use trace::{Trace, TraceStep};
+pub use transition_doc::{
+    RegisteredTransitionDocCase, RegisteredTransitionDocProvider,
+    RegisteredTransitionDocSpecConfig, TransitionDocBundle, TransitionDocMetadata,
+    TransitionDocProvider, TransitionDocReachabilityCase, TransitionDocReachabilityMode,
+    TransitionDocRule, TransitionDocStateEdge, TransitionDocStateNode, TransitionDocStructureCase,
+    build_transition_doc_reachability_case, build_transition_doc_structure_case,
+    collect_transition_doc_bundles, collect_transition_doc_provider_registrations,
+    has_registered_finite_domain, transition_doc_reachability_mode_for,
+    transition_doc_spec_cases_for,
+};
 pub use update_helpers::{function_update, sequence_update};
