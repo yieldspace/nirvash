@@ -1,0 +1,5 @@
+error: driver = ... is no longer supported; use binding = ... and implement ProtocolRuntimeBinding<Spec>
+   --> tests/fixtures/code_tests_legacy_driver.rs:131:46
+    |
+131 | #[code_tests(spec = Spec, binding = Binding, driver = tests::Driver)]
+    |                                              ^^^^^^

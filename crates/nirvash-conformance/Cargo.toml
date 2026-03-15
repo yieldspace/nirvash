@@ -1,0 +1,37 @@
+[package]
+name = "nirvash-conformance"
+description = "Runtime replay, generated harness planning, and test adapters for nirvash."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nirvash-conformance"
+
+[features]
+default = []
+loom = ["dep:loom"]
+shuttle = ["dep:shuttle"]
+
+[lib]
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[dependencies]
+nirvash = { workspace = true }
+nirvash-backends = { workspace = true }
+nirvash-check = { workspace = true }
+nirvash-lower = { workspace = true }
+nirvash-proof = { workspace = true }
+proptest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+loom = { workspace = true, optional = true }
+shuttle = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "nirvash-ir"
+description = "Backend-neutral lowered core and proof obligation types for nirvash."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nirvash-ir"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }

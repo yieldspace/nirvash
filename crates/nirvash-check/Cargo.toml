@@ -1,0 +1,22 @@
+[package]
+name = "nirvash-check"
+description = "Explicit and symbolic model-checker front doors for nirvash."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nirvash-check"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nirvash = { workspace = true }
+nirvash-backends = { workspace = true }
+nirvash-lower = { workspace = true }
+
+[dev-dependencies]
+nirvash-macros = { workspace = true }

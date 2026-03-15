@@ -1,0 +1,26 @@
+[package]
+name = "nirvash-backends"
+description = "Explicit and symbolic backend implementations for nirvash."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/nirvash-backends"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nirvash = { workspace = true }
+nirvash-lower = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+z3 = { workspace = true }
+
+[dev-dependencies]
+nirvash-check = { workspace = true }
+nirvash-ir = { workspace = true }
+nirvash-macros = { workspace = true }

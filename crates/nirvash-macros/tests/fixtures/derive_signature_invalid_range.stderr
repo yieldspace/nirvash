@@ -1,0 +1,5 @@
+error: #[finite_model_domain(range = ...)] requires a single-field newtype
+ --> tests/fixtures/derive_signature_invalid_range.rs:5:8
+  |
+5 | struct InvalidRange {
+  |        ^^^^^^^^^^^^

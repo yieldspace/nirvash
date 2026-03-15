@@ -1,0 +1,13 @@
+error: unsupported registration option; expected cases(...)
+  --> tests/fixtures/case_scoped_constraints_invalid_option.rs:39:26
+   |
+39 | #[state_constraint(Spec, nope("case_a"))]
+   |                          ^^^^
+
+warning: unused import: `nirvash::BoolExpr`
+ --> tests/fixtures/case_scoped_constraints_invalid_option.rs:1:5
+  |
+1 | use nirvash::BoolExpr;
+  |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

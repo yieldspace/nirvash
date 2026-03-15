@@ -1,0 +1,20 @@
+error[E0432]: unresolved imports `nirvash_macros::Signature`, `nirvash_macros::legacy_formal_tests`, `nirvash_macros::legacy_invariant`, `nirvash_macros::legacy_subsystem_spec`
+ --> tests/fixtures/old_macro_names.rs:2:5
+  |
+2 |     Signature as FormalSignature, legacy_formal_tests, legacy_invariant, legacy_subsystem_spec,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^
+  |     |                             |                    |                 |
+  |     |                             |                    |                 no `legacy_subsystem_spec` in the root
+  |     |                             |                    |                 help: a similar name exists in the module: `subsystem_spec`
+  |     |                             |                    no `legacy_invariant` in the root
+  |     |                             no `legacy_formal_tests` in the root
+  |     no `Signature` in the root
+  |
+  = help: consider importing this struct instead:
+          syn::Signature
+
+error[E0433]: failed to resolve: could not find `__private` in `nirvash`
+  --> tests/fixtures/old_macro_names.rs:18:15
+   |
+18 | impl nirvash::__private::TransitionSystem for Spec {
+   |               ^^^^^^^^^ could not find `__private` in `nirvash`

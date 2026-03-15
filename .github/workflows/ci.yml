@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace
+
+      - name: cargo package
+        shell: bash
+        run: |
+          set -euo pipefail
+          crates=(
+            nirvash
+            nirvash-foundation
+            nirvash-ir
+            nirvash-lower
+            nirvash-macros
+            nirvash-backends
+            nirvash-check
+            nirvash-conformance
+            nirvash-proof
+            nirvash-docgen
+            cargo-nirvash
+          )
+          patch_file="$(mktemp)"
+          {
+            echo "[patch.crates-io]"
+            for crate in "${crates[@]}"; do
+              echo "$crate = { path = \"$GITHUB_WORKSPACE/crates/$crate\" }"
+            done
+          } > "$patch_file"
+          cargo package --workspace --allow-dirty --no-verify --config "$patch_file"

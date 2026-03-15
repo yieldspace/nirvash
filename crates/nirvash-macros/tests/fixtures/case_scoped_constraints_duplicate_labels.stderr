@@ -1,0 +1,13 @@
+error: duplicate case label `case_a`
+  --> tests/fixtures/case_scoped_constraints_duplicate_labels.rs:39:43
+   |
+39 | #[action_constraint(Spec, cases("case_a", "case_a"))]
+   |                                           ^^^^^^^^
+
+warning: unused import: `nirvash::StepExpr`
+ --> tests/fixtures/case_scoped_constraints_duplicate_labels.rs:1:5
+  |
+1 | use nirvash::StepExpr;
+  |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
