@@ -1,0 +1,10 @@
+error: Kani support was removed; use explicit/proptest/trace/loom/shuttle or replay materialization
+   --> tests/fixtures/code_tests_kani_installer_removed.rs:12:1
+    |
+ 12 | #[code_tests]
+    | ^^^^^^^^^^^^^
+...
+105 | generated::install::kani_harnesses!(binding = Binding);
+    | ------------------------------------------------------ in this macro invocation
+    |
+    = note: this error originates in the macro `generated::install::kani_harnesses` (in Nightly builds, run with -Z macro-backtrace for more info)

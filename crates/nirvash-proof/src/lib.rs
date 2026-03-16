@@ -117,7 +117,6 @@ impl ProofBundle {
 #[serde(rename_all = "snake_case")]
 pub enum ReplayBundleSource {
     Explicit,
-    KaniConcrete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,36 +148,12 @@ impl NormalizedReplayBundle {
         }
     }
 
-    pub fn from_kani_concrete(
-        spec_name: impl Into<String>,
-        profile: impl Into<String>,
-        engine: impl Into<String>,
-        playback: KaniConcretePlayback,
-    ) -> Self {
-        Self {
-            spec_name: spec_name.into(),
-            profile: profile.into(),
-            engine: engine.into(),
-            detail: json!({
-                "source": ReplayBundleSource::KaniConcrete,
-                "payload": playback.detail,
-            }),
-            action_trace: playback.action_trace,
-        }
-    }
-
     pub fn source(&self) -> Option<ReplayBundleSource> {
         self.detail
             .get("source")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok())
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct KaniConcretePlayback {
-    pub detail: Value,
-    pub action_trace: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1350,9 +1325,9 @@ fn render_unchanged_smt<'a>(env: &mut SmtEnv, vars: impl IntoIterator<Item = &'a
 #[cfg(test)]
 mod tests {
     use super::{
-        ExportedArtifactKind, FakeProofDischarger, KaniConcretePlayback, NormalizedReplayBundle,
-        ProofBundleExporter, ProofDischarger, ProofExportError, ProofObligation,
-        ProofObligationKind, ReplayBundleSource, importer, invariant_obligations,
+        ExportedArtifactKind, FakeProofDischarger, NormalizedReplayBundle, ProofBundleExporter,
+        ProofDischarger, ProofExportError, ProofObligation, ProofObligationKind,
+        ReplayBundleSource, importer, invariant_obligations,
     };
     use nirvash_ir::{
         ActionExpr, ComparisonOp, FairnessDecl, SpecCore, StateExpr, TemporalExpr, ValueExpr,
@@ -1585,26 +1560,6 @@ mod tests {
         assert_eq!(
             bundle.action_trace,
             json!({ "initial": "idle", "steps": [] })
-        );
-    }
-
-    #[test]
-    fn kani_concrete_playback_normalizes_to_shared_bundle_schema() {
-        let bundle = NormalizedReplayBundle::from_kani_concrete(
-            "DemoSpec",
-            "unit_default",
-            "kani_bounded",
-            KaniConcretePlayback {
-                detail: json!({ "witness": "demo" }),
-                action_trace: json!({ "initial": "idle", "steps": ["tick"] }),
-            },
-        );
-
-        assert_eq!(bundle.engine, "kani_bounded");
-        assert_eq!(bundle.source(), Some(ReplayBundleSource::KaniConcrete));
-        assert_eq!(
-            bundle.action_trace,
-            json!({ "initial": "idle", "steps": ["tick"] })
         );
     }
 

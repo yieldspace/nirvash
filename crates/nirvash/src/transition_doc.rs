@@ -207,15 +207,13 @@ where
         return None;
     };
     entry.build_cases.map(|build| {
-        *build()
-            .downcast::<Vec<Spec>>()
-            .unwrap_or_else(|_| {
-                panic!(
-                    "#[doc_spec] cases(...) for spec `{}` must return Vec<{}>",
-                    std::any::type_name::<Spec>(),
-                    std::any::type_name::<Spec>()
-                )
-            })
+        *build().downcast::<Vec<Spec>>().unwrap_or_else(|_| {
+            panic!(
+                "#[doc_spec] cases(...) for spec `{}` must return Vec<{}>",
+                std::any::type_name::<Spec>(),
+                std::any::type_name::<Spec>()
+            )
+        })
     })
 }
 
@@ -474,24 +472,36 @@ where
         crate::BoolExprAst::Literal(value) => value.to_string(),
         crate::BoolExprAst::FieldRead(field) => normalize_tokens(field.label()),
         crate::BoolExprAst::PureCall(field) => normalize_tokens(field.label()),
-        crate::BoolExprAst::Eq(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::BoolExprAst::Ne(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::BoolExprAst::Lt(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::BoolExprAst::Le(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::BoolExprAst::Gt(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::BoolExprAst::Ge(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
+        crate::BoolExprAst::Eq(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::BoolExprAst::Ne(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::BoolExprAst::Lt(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::BoolExprAst::Le(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::BoolExprAst::Gt(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::BoolExprAst::Ge(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
         crate::BoolExprAst::Contains(predicate) => format_comparison(
             predicate.lhs(),
             builtin_predicate_op_text(predicate.op()),
@@ -502,9 +512,7 @@ where
             builtin_predicate_op_text(predicate.op()),
             predicate.rhs(),
         ),
-        crate::BoolExprAst::Match(matcher) => {
-            format_match(matcher.value(), matcher.pattern())
-        }
+        crate::BoolExprAst::Match(matcher) => format_match(matcher.value(), matcher.pattern()),
         crate::BoolExprAst::ForAll(quantifier) | crate::BoolExprAst::Exists(quantifier) => {
             format_quantifier(quantifier.kind(), quantifier.domain(), quantifier.body())
         }
@@ -535,24 +543,36 @@ where
         crate::StepExprAst::Literal(value) => value.to_string(),
         crate::StepExprAst::FieldRead(field) => normalize_tokens(field.label()),
         crate::StepExprAst::PureCall(field) => normalize_tokens(field.label()),
-        crate::StepExprAst::Eq(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::StepExprAst::Ne(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::StepExprAst::Lt(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::StepExprAst::Le(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::StepExprAst::Gt(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        crate::StepExprAst::Ge(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
+        crate::StepExprAst::Eq(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::StepExprAst::Ne(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::StepExprAst::Lt(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::StepExprAst::Le(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::StepExprAst::Gt(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        crate::StepExprAst::Ge(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
         crate::StepExprAst::Contains(predicate) => format_comparison(
             predicate.lhs(),
             builtin_predicate_op_text(predicate.op()),
@@ -563,9 +583,7 @@ where
             builtin_predicate_op_text(predicate.op()),
             predicate.rhs(),
         ),
-        crate::StepExprAst::Match(matcher) => {
-            format_match(matcher.value(), matcher.pattern())
-        }
+        crate::StepExprAst::Match(matcher) => format_match(matcher.value(), matcher.pattern()),
         crate::StepExprAst::ForAll(quantifier) | crate::StepExprAst::Exists(quantifier) => {
             format_quantifier(quantifier.kind(), quantifier.domain(), quantifier.body())
         }
@@ -594,24 +612,36 @@ where
         GuardAst::Literal(value) => value.to_string(),
         GuardAst::FieldRead(field) => normalize_tokens(field.label()),
         GuardAst::PureCall(field) => normalize_tokens(field.label()),
-        GuardAst::Eq(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        GuardAst::Ne(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        GuardAst::Lt(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        GuardAst::Le(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        GuardAst::Gt(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
-        GuardAst::Ge(compare) => {
-            format_comparison(compare.lhs(), comparison_op_text(compare.op()), compare.rhs())
-        }
+        GuardAst::Eq(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        GuardAst::Ne(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        GuardAst::Lt(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        GuardAst::Le(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        GuardAst::Gt(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
+        GuardAst::Ge(compare) => format_comparison(
+            compare.lhs(),
+            comparison_op_text(compare.op()),
+            compare.rhs(),
+        ),
         GuardAst::Contains(predicate) => format_comparison(
             predicate.lhs(),
             builtin_predicate_op_text(predicate.op()),
@@ -641,15 +671,25 @@ where
         UpdateAst::Sequence(ops) => ops
             .iter()
             .map(|op| match op {
-                UpdateOp::Assign { target, value_ast, .. } => {
-                    format!("set {} <= {}", normalize_tokens(target), format_update_value_expr(value_ast))
+                UpdateOp::Assign {
+                    target, value_ast, ..
+                } => {
+                    format!(
+                        "set {} <= {}",
+                        normalize_tokens(target),
+                        format_update_value_expr(value_ast)
+                    )
                 }
-                UpdateOp::SetInsert { target, item_ast, .. } => format!(
+                UpdateOp::SetInsert {
+                    target, item_ast, ..
+                } => format!(
                     "insert {} <= {}",
                     normalize_tokens(target),
                     format_update_value_expr(item_ast)
                 ),
-                UpdateOp::SetRemove { target, item_ast, .. } => format!(
+                UpdateOp::SetRemove {
+                    target, item_ast, ..
+                } => format!(
                     "remove {} <= {}",
                     normalize_tokens(target),
                     format_update_value_expr(item_ast)
@@ -697,10 +737,14 @@ where
             format_binary_value_expr(lhs, "union", rhs, |expr| format_update_value_expr(expr))
         }
         UpdateValueExprAst::Intersection { lhs, rhs } => {
-            format_binary_value_expr(lhs, "intersection", rhs, |expr| format_update_value_expr(expr))
+            format_binary_value_expr(lhs, "intersection", rhs, |expr| {
+                format_update_value_expr(expr)
+            })
         }
         UpdateValueExprAst::Difference { lhs, rhs } => {
-            format_binary_value_expr(lhs, "difference", rhs, |expr| format_update_value_expr(expr))
+            format_binary_value_expr(lhs, "difference", rhs, |expr| {
+                format_update_value_expr(expr)
+            })
         }
         UpdateValueExprAst::SequenceUpdate { base, index, value } => format!(
             "{}[{} := {}]",
@@ -765,7 +809,9 @@ where
             format_binary_value_expr(lhs, "union", rhs, |expr| format_guard_value_expr(expr))
         }
         ErasedGuardValueExprAst::Intersection { lhs, rhs } => {
-            format_binary_value_expr(lhs, "intersection", rhs, |expr| format_guard_value_expr(expr))
+            format_binary_value_expr(lhs, "intersection", rhs, |expr| {
+                format_guard_value_expr(expr)
+            })
         }
         ErasedGuardValueExprAst::Difference { lhs, rhs } => {
             format_binary_value_expr(lhs, "difference", rhs, |expr| format_guard_value_expr(expr))
@@ -813,7 +859,9 @@ where
             format_binary_value_expr(lhs, "union", rhs, |expr| format_state_value_expr(expr))
         }
         ErasedStateExprAst::Intersection { lhs, rhs } => {
-            format_binary_value_expr(lhs, "intersection", rhs, |expr| format_state_value_expr(expr))
+            format_binary_value_expr(lhs, "intersection", rhs, |expr| {
+                format_state_value_expr(expr)
+            })
         }
         ErasedStateExprAst::Difference { lhs, rhs } => {
             format_binary_value_expr(lhs, "difference", rhs, |expr| format_state_value_expr(expr))
@@ -862,7 +910,9 @@ where
             format_binary_value_expr(lhs, "union", rhs, |expr| format_step_value_expr(expr))
         }
         ErasedStepValueExprAst::Intersection { lhs, rhs } => {
-            format_binary_value_expr(lhs, "intersection", rhs, |expr| format_step_value_expr(expr))
+            format_binary_value_expr(lhs, "intersection", rhs, |expr| {
+                format_step_value_expr(expr)
+            })
         }
         ErasedStepValueExprAst::Difference { lhs, rhs } => {
             format_binary_value_expr(lhs, "difference", rhs, |expr| format_step_value_expr(expr))
@@ -885,12 +935,7 @@ where
     }
 }
 
-fn format_binary_value_expr<T, F>(
-    lhs: &T,
-    op: &str,
-    rhs: &T,
-    format: F,
-) -> String
+fn format_binary_value_expr<T, F>(lhs: &T, op: &str, rhs: &T, format: F) -> String
 where
     F: Fn(&T) -> String,
 {
@@ -898,12 +943,7 @@ where
 }
 
 fn format_comparison(lhs: &str, op: &str, rhs: &str) -> String {
-    format!(
-        "{} {} {}",
-        normalize_tokens(lhs),
-        op,
-        normalize_tokens(rhs)
-    )
+    format!("{} {} {}", normalize_tokens(lhs), op, normalize_tokens(rhs))
 }
 
 fn format_match(value: &str, pattern: &str) -> String {
@@ -979,20 +1019,32 @@ fn normalize_tokens(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        FiniteModelDomain, nirvash_expr, nirvash_step_expr, nirvash_transition_program,
-    };
+    use crate::FiniteModelDomain;
+    use nirvash_foundation::BoundedDomain;
+    use nirvash_macros::{nirvash_expr, nirvash_step_expr, nirvash_transition_program};
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, FiniteModelDomain)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum State {
         Idle,
         Busy,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, FiniteModelDomain)]
+    impl FiniteModelDomain for State {
+        fn finite_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Idle, Self::Busy])
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Action {
         Start,
         Stop,
+    }
+
+    impl FiniteModelDomain for Action {
+        fn finite_domain() -> BoundedDomain<Self> {
+            BoundedDomain::new(vec![Self::Start, Self::Stop])
+        }
     }
 
     fn demo_program() -> TransitionProgram<State, Action> {
@@ -1016,7 +1068,11 @@ mod tests {
             vec!["Action::Start".to_owned(), "Action::Stop".to_owned()]
         );
         assert_eq!(structure.writes, vec!["self".to_owned()]);
-        assert!(structure.rules[0].guard.contains("action matches Action::Start"));
+        assert!(
+            structure.rules[0]
+                .guard
+                .contains("action matches Action::Start")
+        );
     }
 
     #[test]

@@ -1945,7 +1945,12 @@ impl syn::parse::Parse for DocCaseArgs {
             let _eq: syn::Token![=] = input.parse()?;
             match ident.to_string().as_str() {
                 "spec" => spec = Some(input.parse()?),
-                _ => return Err(syn::Error::new(ident.span(), "unsupported doc_case argument")),
+                _ => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        "unsupported doc_case argument",
+                    ));
+                }
             }
             if input.peek(syn::Token![,]) {
                 let _ = input.parse::<syn::Token![,]>()?;

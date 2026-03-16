@@ -1,5 +1,6 @@
 use std::{
     any::Any,
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
     fmt::{self, Debug, Display},
     fs,
@@ -19,7 +20,6 @@ use nirvash_lower::{
     FiniteModelDomain, FrontendSpec, LoweringCx, ModelBackend, ModelCheckConfig, ModelInstance,
     ReachableGraphSnapshot, TemporalSpec, Trace, TraceStep,
 };
-use nirvash_proof::{KaniConcretePlayback, NormalizedReplayBundle};
 use proptest::{
     arbitrary::Arbitrary,
     strategy::{Strategy, ValueTree},
@@ -27,6 +27,8 @@ use proptest::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tracing::{Dispatch, debug, level_filters::LevelFilter};
+use tracing_subscriber::EnvFilter;
 
 #[doc(hidden)]
 pub use proptest as __nirvash_proptest;
@@ -233,6 +235,247 @@ pub trait GeneratedBinding<Spec: SpecOracle>: RuntimeBinding<Spec> {
 
     fn supports_concurrency() -> bool {
         false
+    }
+}
+
+thread_local! {
+    static CURRENT_GENERATED_TEST_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn set_current_generated_test_name(test_name: &str) {
+    CURRENT_GENERATED_TEST_NAME.with(|current| {
+        *current.borrow_mut() = Some(test_name.to_owned());
+    });
+}
+
+fn current_generated_test_name() -> Option<String> {
+    CURRENT_GENERATED_TEST_NAME.with(|current| current.borrow().clone())
+}
+
+fn current_generated_test_name_or(default: &str) -> String {
+    current_generated_test_name().unwrap_or_else(|| default.to_owned())
+}
+
+#[doc(hidden)]
+pub fn __init_generated_test_tracing() {
+    let _ = generated_test_dispatch();
+}
+
+fn generated_test_dispatch() -> &'static Dispatch {
+    static GENERATED_TEST_TRACING_DISPATCH: OnceLock<Dispatch> = OnceLock::new();
+
+    GENERATED_TEST_TRACING_DISPATCH.get_or_init(|| {
+        let env_filter = EnvFilter::builder()
+            .with_default_directive(LevelFilter::DEBUG.into())
+            .parse_lossy(std::env::var(EnvFilter::DEFAULT_ENV).unwrap_or_default());
+        Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_test_writer()
+                .with_ansi(false)
+                .without_time()
+                .with_target(false)
+                .compact()
+                .finish(),
+        )
+    })
+}
+
+#[doc(hidden)]
+pub fn __enter_generated_test_tracing() -> tracing::dispatcher::DefaultGuard {
+    __init_generated_test_tracing();
+    tracing::dispatcher::set_default(generated_test_dispatch())
+}
+
+#[doc(hidden)]
+pub fn __debug_generated_test_wrapper_start<Spec>(
+    test_name: &str,
+    binding_name: &str,
+    plan: &GeneratedHarnessPlan<Spec>,
+) where
+    Spec: FrontendSpec,
+{
+    let _guard = __enter_generated_test_tracing();
+    set_current_generated_test_name(test_name);
+
+    let profiles = plan
+        .profiles
+        .iter()
+        .map(|profile| profile.label)
+        .collect::<Vec<_>>();
+
+    debug!(
+        test_name = test_name,
+        spec = plan.spec_name,
+        binding = binding_name,
+        profiles = ?profiles,
+        "generated test wrapper start"
+    );
+}
+
+#[doc(hidden)]
+pub fn __debug_materialized_replay_test_start(
+    test_name: &str,
+    spec: &str,
+    profile: &str,
+    binding_name: &str,
+    replay_path: &Path,
+) {
+    let _guard = __enter_generated_test_tracing();
+    set_current_generated_test_name(test_name);
+
+    debug!(
+        test_name = test_name,
+        spec = spec,
+        profile = profile,
+        engine = "replay_materialized",
+        binding = binding_name,
+        model_case = "replay",
+        route = "<pending>",
+        route_len = 0usize,
+        outcome = "start",
+        replay_path = %replay_path.display(),
+        "materialized replay test start"
+    );
+}
+
+fn format_action_route<'a, A, I>(actions: I) -> (usize, String)
+where
+    A: Debug + 'a,
+    I: IntoIterator<Item = &'a A>,
+{
+    let route = actions
+        .into_iter()
+        .map(|action| format!("{action:?}"))
+        .collect::<Vec<_>>();
+    let route_len = route.len();
+    let route = if route.is_empty() {
+        "<empty>".to_owned()
+    } else {
+        route.join(" -> ")
+    };
+    (route_len, route)
+}
+
+fn debug_generated_engine_start(
+    spec_name: &str,
+    profile_label: &str,
+    engine: &str,
+    binding_name: &str,
+    model_case: &str,
+) {
+    let _guard = __enter_generated_test_tracing();
+
+    let test_name = current_generated_test_name_or("generated_test");
+    debug!(
+        test_name = test_name.as_str(),
+        spec = spec_name,
+        profile = profile_label,
+        engine = engine,
+        binding = binding_name,
+        model_case = model_case,
+        route = "<pending>",
+        route_len = 0usize,
+        outcome = "start",
+        "generated engine start"
+    );
+}
+
+fn debug_generated_route<'a, A, I>(
+    spec_name: &str,
+    profile_label: &str,
+    engine: &str,
+    binding_name: &str,
+    model_case: &str,
+    outcome: &str,
+    actions: I,
+    case_index: Option<usize>,
+    replay_path: Option<&Path>,
+    schedule_path: Option<&Path>,
+) where
+    A: Debug + 'a,
+    I: IntoIterator<Item = &'a A>,
+{
+    let _guard = __enter_generated_test_tracing();
+
+    let (route_len, route) = format_action_route(actions);
+    let test_name = current_generated_test_name_or("generated_test");
+    let replay_path = replay_path.map(|path| path.display().to_string());
+    let schedule_path = schedule_path.map(|path| path.display().to_string());
+
+    debug!(
+        test_name = test_name.as_str(),
+        spec = spec_name,
+        profile = profile_label,
+        engine = engine,
+        binding = binding_name,
+        model_case = model_case,
+        route = route.as_str(),
+        route_len = route_len,
+        outcome = outcome,
+        case_index = ?case_index,
+        replay_path = replay_path.as_deref().unwrap_or(""),
+        schedule_path = schedule_path.as_deref().unwrap_or(""),
+        "generated action route"
+    );
+}
+
+#[doc(hidden)]
+pub fn __debug_replay_route_start<Binding, S, A, Output>(
+    spec_name: &str,
+    profile_label: &str,
+    bundle: &GeneratedReplayBundle<S, A, Output>,
+    replay_path: &Path,
+) where
+    A: Debug,
+{
+    let binding_name = std::any::type_name::<Binding>();
+    debug_generated_route(
+        spec_name,
+        profile_label,
+        "replay",
+        binding_name,
+        "replay",
+        "start",
+        bundle.action_trace.steps.iter().map(|step| &step.action),
+        None,
+        Some(replay_path),
+        None,
+    );
+}
+
+#[doc(hidden)]
+pub fn __debug_replay_route_finish<Binding, S, A, Output>(
+    spec_name: &str,
+    profile_label: &str,
+    bundle: &GeneratedReplayBundle<S, A, Output>,
+    replay_path: &Path,
+    outcome: &str,
+) where
+    A: Debug,
+{
+    let binding_name = std::any::type_name::<Binding>();
+    debug_generated_route(
+        spec_name,
+        profile_label,
+        "replay",
+        binding_name,
+        "replay",
+        outcome,
+        bundle.action_trace.steps.iter().map(|step| &step.action),
+        None,
+        Some(replay_path),
+        None,
+    );
+}
+
+fn engine_plan_name(engine: &EnginePlan) -> &'static str {
+    match engine {
+        EnginePlan::ExplicitSuite => "explicit_suite",
+        EnginePlan::ProptestOnline { .. } => "proptest_online",
+        EnginePlan::TraceValidation { .. } => "trace_validation",
+        EnginePlan::LoomSmall { .. } => "loom_small",
+        EnginePlan::ShuttlePCT { .. } => "shuttle_pct",
     }
 }
 
@@ -1440,9 +1683,6 @@ pub enum EnginePlan {
         cases: usize,
         max_steps: usize,
     },
-    KaniBounded {
-        depth: usize,
-    },
     TraceValidation {
         engine: TraceValidationEngine,
     },
@@ -1638,7 +1878,6 @@ where
                 cases: 256,
                 max_steps: 8,
             },
-            EnginePlan::KaniBounded { depth: 4 },
         ])
 }
 
@@ -1762,12 +2001,6 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObligationId(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MaterializedKaniObligation<A> {
-    pub id: String,
-    pub actions: Vec<A>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObligationKind<Spec: FrontendSpec> {
@@ -2066,6 +2299,7 @@ where
         Clone + Debug + PartialEq + Eq + Serialize + DeserializeOwned + Send + Sync + 'static,
     Binding: GeneratedBinding<Spec>,
 {
+    let _guard = __enter_generated_test_tracing();
     write_manifest(
         metadata,
         profile,
@@ -2074,6 +2308,13 @@ where
         materialize_failures,
     )?;
     for engine in &profile.engines {
+        debug_generated_engine_start(
+            metadata.spec_name,
+            profile.label,
+            engine_plan_name(engine),
+            binding_name,
+            profile.model_instance.label(),
+        );
         match engine {
             EnginePlan::ExplicitSuite => run_explicit_suite::<Spec, Binding>(
                 spec,
@@ -2092,12 +2333,6 @@ where
                     *cases,
                     *max_steps,
                 )?
-            }
-            EnginePlan::KaniBounded { .. } => {
-                return Err(HarnessError::Binding(format!(
-                    "KaniBounded profiles are materialized at build time; run `cargo nirvash materialize-tests --spec {} --binding {} --profile {}` first",
-                    metadata.spec_name, binding_name, profile.label,
-                )));
             }
             EnginePlan::TraceValidation { .. } => {
                 return Err(HarnessError::Binding(
@@ -2176,6 +2411,7 @@ where
         Clone + Debug + PartialEq + Eq + Serialize + DeserializeOwned + Send + Sync + 'static,
     Binding: GeneratedBinding<Spec> + TraceBinding<Spec>,
 {
+    let _guard = __enter_generated_test_tracing();
     write_manifest(
         metadata,
         profile,
@@ -2184,6 +2420,13 @@ where
         materialize_failures,
     )?;
     for engine in &profile.engines {
+        debug_generated_engine_start(
+            metadata.spec_name,
+            profile.label,
+            engine_plan_name(engine),
+            binding_name,
+            profile.model_instance.label(),
+        );
         match engine {
             EnginePlan::TraceValidation { engine } => run_trace_validation_suite::<Spec, Binding>(
                 spec,
@@ -2192,14 +2435,6 @@ where
                 binding_name,
                 artifact_dir,
                 engine.clone(),
-            )?,
-            EnginePlan::KaniBounded { depth } => run_kani_bounded::<Spec, Binding>(
-                spec,
-                metadata,
-                profile,
-                binding_name,
-                artifact_dir,
-                *depth,
             )?,
             other => {
                 return Err(HarnessError::Binding(format!(
@@ -2228,6 +2463,7 @@ where
     Binding: GeneratedBinding<Spec> + ConcurrentBinding<Spec>,
     Binding::Sut: Send + 'static,
 {
+    let _guard = __enter_generated_test_tracing();
     write_manifest(
         metadata,
         profile,
@@ -2236,6 +2472,13 @@ where
         materialize_failures,
     )?;
     for engine in &profile.engines {
+        debug_generated_engine_start(
+            metadata.spec_name,
+            profile.label,
+            engine_plan_name(engine),
+            binding_name,
+            profile.model_instance.label(),
+        );
         match engine {
             EnginePlan::LoomSmall {
                 threads,
@@ -2247,7 +2490,7 @@ where
                     *threads,
                     *max_permutations,
                 )?;
-                write_schedule_artifact(
+                let schedule_path = write_schedule_artifact(
                     metadata,
                     profile,
                     binding_name,
@@ -2256,6 +2499,18 @@ where
                     Some(&execution.schedule),
                 )?;
                 if let Err(error) = validate_observed_action_trace(spec, &execution.action_trace) {
+                    debug_generated_route(
+                        metadata.spec_name,
+                        profile.label,
+                        "loom_small",
+                        binding_name,
+                        profile.model_instance.label(),
+                        "error",
+                        execution.action_trace.steps.iter().map(|step| &step.action),
+                        None,
+                        None,
+                        Some(schedule_path.as_path()),
+                    );
                     persist_failure_with_context::<Spec>(
                         metadata,
                         profile,
@@ -2269,6 +2524,18 @@ where
                     )?;
                     return Err(error);
                 }
+                debug_generated_route(
+                    metadata.spec_name,
+                    profile.label,
+                    "loom_small",
+                    binding_name,
+                    profile.model_instance.label(),
+                    "ok",
+                    execution.action_trace.steps.iter().map(|step| &step.action),
+                    None,
+                    None,
+                    Some(schedule_path.as_path()),
+                );
                 persist_failure_with_context::<Spec>(
                     metadata,
                     profile,
@@ -2284,7 +2551,7 @@ where
             EnginePlan::ShuttlePCT { depth, runs } => {
                 let execution =
                     run_shuttle_pct::<Spec, Binding>(spec, &profile.seeds, *depth, *runs)?;
-                write_schedule_artifact(
+                let schedule_path = write_schedule_artifact(
                     metadata,
                     profile,
                     binding_name,
@@ -2293,6 +2560,18 @@ where
                     Some(&execution.schedule),
                 )?;
                 if let Err(error) = validate_observed_action_trace(spec, &execution.action_trace) {
+                    debug_generated_route(
+                        metadata.spec_name,
+                        profile.label,
+                        "shuttle_pct",
+                        binding_name,
+                        profile.model_instance.label(),
+                        "error",
+                        execution.action_trace.steps.iter().map(|step| &step.action),
+                        None,
+                        None,
+                        Some(schedule_path.as_path()),
+                    );
                     persist_failure_with_context::<Spec>(
                         metadata,
                         profile,
@@ -2306,6 +2585,18 @@ where
                     )?;
                     return Err(error);
                 }
+                debug_generated_route(
+                    metadata.spec_name,
+                    profile.label,
+                    "shuttle_pct",
+                    binding_name,
+                    profile.model_instance.label(),
+                    "ok",
+                    execution.action_trace.steps.iter().map(|step| &step.action),
+                    None,
+                    None,
+                    Some(schedule_path.as_path()),
+                );
                 persist_failure_with_context::<Spec>(
                     metadata,
                     profile,
@@ -2433,6 +2724,7 @@ where
     Spec::ExpectedOutput: Clone + Debug + PartialEq + Eq,
     Binding: RuntimeBinding<Spec>,
 {
+    let _guard = __enter_generated_test_tracing();
     let mut sut = Binding::create(fixture)
         .map_err(|error| HarnessError::Binding(format!("failed to create runtime: {error}")))?;
     let mut env = TestEnvironment::default();
@@ -2532,7 +2824,7 @@ fn run_explicit_suite<Spec, Binding>(
     spec: &Spec,
     metadata: &GeneratedSpecMetadata,
     profile: &TestProfile<Spec>,
-    _binding_name: &str,
+    binding_name: &str,
     artifact_dir: &ArtifactDirPolicy,
 ) -> Result<(), HarnessError>
 where
@@ -2557,16 +2849,52 @@ where
     let paths = canonical_paths(&snapshot);
     for (state_index, state) in snapshot.states.iter().enumerate() {
         for action in spec.actions() {
-            let outcome = execute_from_path::<Spec, Binding>(
+            let route_actions = paths[state_index]
+                .iter()
+                .map(|step| &step.action)
+                .chain(std::iter::once(&action));
+            let outcome = match execute_from_path::<Spec, Binding>(
                 spec,
                 &profile.seeds,
                 &paths[state_index],
                 state,
                 &action,
-            )?;
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    debug_generated_route(
+                        metadata.spec_name,
+                        profile.label,
+                        "explicit_suite",
+                        binding_name,
+                        profile.model_instance.label(),
+                        "error",
+                        route_actions,
+                        None,
+                        None,
+                        None,
+                    );
+                    return Err(error);
+                }
+            };
             let expected_after = matching_successor(spec, state, &action, &outcome.after);
             let expected_output = spec.expected_output(state, &action, expected_after.as_ref());
             if expected_output != outcome.output {
+                debug_generated_route(
+                    metadata.spec_name,
+                    profile.label,
+                    "explicit_suite",
+                    binding_name,
+                    profile.model_instance.label(),
+                    "error",
+                    paths[state_index]
+                        .iter()
+                        .map(|step| &step.action)
+                        .chain(std::iter::once(&action)),
+                    None,
+                    None,
+                    None,
+                );
                 persist_failure::<Spec>(
                     metadata,
                     profile,
@@ -2583,6 +2911,21 @@ where
             match expected_after {
                 Some(next) => {
                     if !outcome.after.matches(&next) {
+                        debug_generated_route(
+                            metadata.spec_name,
+                            profile.label,
+                            "explicit_suite",
+                            binding_name,
+                            profile.model_instance.label(),
+                            "error",
+                            paths[state_index]
+                                .iter()
+                                .map(|step| &step.action)
+                                .chain(std::iter::once(&action)),
+                            None,
+                            None,
+                            None,
+                        );
                         persist_failure::<Spec>(
                             metadata,
                             profile,
@@ -2599,6 +2942,21 @@ where
                 }
                 None => {
                     if !outcome.after.matches_known(&outcome.before) {
+                        debug_generated_route(
+                            metadata.spec_name,
+                            profile.label,
+                            "explicit_suite",
+                            binding_name,
+                            profile.model_instance.label(),
+                            "error",
+                            paths[state_index]
+                                .iter()
+                                .map(|step| &step.action)
+                                .chain(std::iter::once(&action)),
+                            None,
+                            None,
+                            None,
+                        );
                         persist_failure::<Spec>(
                             metadata,
                             profile,
@@ -2614,6 +2972,21 @@ where
                     }
                 }
             }
+            debug_generated_route(
+                metadata.spec_name,
+                profile.label,
+                "explicit_suite",
+                binding_name,
+                profile.model_instance.label(),
+                "ok",
+                paths[state_index]
+                    .iter()
+                    .map(|step| &step.action)
+                    .chain(std::iter::once(&action)),
+                None,
+                None,
+                None,
+            );
         }
     }
     Ok(())
@@ -2623,7 +2996,7 @@ fn run_proptest_online<Spec, Binding>(
     spec: &Spec,
     metadata: &GeneratedSpecMetadata,
     profile: &TestProfile<Spec>,
-    _binding_name: &str,
+    binding_name: &str,
     artifact_dir: &ArtifactDirPolicy,
     cases: usize,
     max_steps: usize,
@@ -2661,7 +3034,7 @@ where
         Vec::new()
     };
     let mut rng = Lcg::new(profile.seeds.environment.rng_seed);
-    for _case_index in 0..cases {
+    for case_index in 0..cases {
         let fixture = resolve_fixture::<Binding, Spec>(&profile.seeds)?;
         let mut sut = Binding::create(fixture)
             .map_err(|error| HarnessError::Binding(format!("failed to create runtime: {error}")))?;
@@ -2684,6 +3057,7 @@ where
                 })
                 .unwrap_or_default();
         let mut previous_action = None::<Spec::Action>;
+        let mut executed_actions = Vec::new();
         for step_index in 0..max_steps.max(1) {
             let action = if let Some(action) = guided_prefix.get(step_index) {
                 action.clone()
@@ -2696,15 +3070,46 @@ where
                     &mut rng,
                 )?
             };
-            let output = Binding::apply(&mut sut, &action, &mut env).map_err(|error| {
-                HarnessError::Binding(format!("proptest action {step_index} failed: {error}"))
-            })?;
+            let output = match Binding::apply(&mut sut, &action, &mut env) {
+                Ok(output) => output,
+                Err(error) => {
+                    executed_actions.push(action.clone());
+                    debug_generated_route(
+                        metadata.spec_name,
+                        profile.label,
+                        "proptest_online",
+                        binding_name,
+                        profile.model_instance.label(),
+                        "error",
+                        executed_actions.iter(),
+                        Some(case_index),
+                        None,
+                        None,
+                    );
+                    return Err(HarnessError::Binding(format!(
+                        "proptest action {step_index} failed: {error}"
+                    )));
+                }
+            };
             let expected_output = Binding::project_output(&action, &output);
             let after = Binding::project(&sut);
+            executed_actions.push(action.clone());
             let matching = matching_successor(spec, &before, &action, &after);
             let expected = spec.expected_output(&before, &action, matching.as_ref());
             if expected != expected_output {
                 let bundle = detailed_and_action_trace(&before, &action, &expected_output, &after);
+                debug_generated_route(
+                    metadata.spec_name,
+                    profile.label,
+                    "proptest_online",
+                    binding_name,
+                    profile.model_instance.label(),
+                    "error",
+                    executed_actions.iter(),
+                    Some(case_index),
+                    None,
+                    None,
+                );
                 persist_failure::<Spec>(
                     metadata,
                     profile,
@@ -2736,6 +3141,18 @@ where
             }
             before = after.as_ref().cloned().unwrap_or(before);
         }
+        debug_generated_route(
+            metadata.spec_name,
+            profile.label,
+            "proptest_online",
+            binding_name,
+            profile.model_instance.label(),
+            "ok",
+            executed_actions.iter(),
+            Some(case_index),
+            None,
+            None,
+        );
     }
     Ok(())
 }
@@ -2925,7 +3342,7 @@ fn run_trace_validation_suite<Spec, Binding>(
     spec: &Spec,
     metadata: &GeneratedSpecMetadata,
     profile: &TestProfile<Spec>,
-    _binding_name: &str,
+    binding_name: &str,
     artifact_dir: &ArtifactDirPolicy,
     engine: TraceValidationEngine,
 ) -> Result<(), HarnessError>
@@ -2949,6 +3366,7 @@ where
         .full_reachable_graph_snapshot()
         .map_err(|error| HarnessError::Refinement(format!("reachable graph failed: {error:?}")))?;
     let paths = canonical_paths(&snapshot);
+    let mut successful_replay = None;
     for (state_index, state) in snapshot.states.iter().enumerate() {
         if !snapshot.initial_indices.contains(&state_index) {
             continue;
@@ -2957,19 +3375,55 @@ where
             if spec.transition_relation(state, &action).is_empty() {
                 continue;
             }
-            let outcome = execute_with_trace::<Spec, Binding>(
+            let route_actions = paths[state_index]
+                .iter()
+                .map(|step| &step.action)
+                .chain(std::iter::once(&action));
+            let outcome = match execute_with_trace::<Spec, Binding>(
                 spec,
                 &profile.seeds,
                 &paths[state_index],
                 state,
                 &action,
-            )?;
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    debug_generated_route(
+                        metadata.spec_name,
+                        profile.label,
+                        "trace_validation",
+                        binding_name,
+                        profile.model_instance.label(),
+                        "error",
+                        route_actions,
+                        None,
+                        None,
+                        None,
+                    );
+                    return Err(error);
+                }
+            };
             if let Err(error) = assert_trace_refines(
                 spec,
                 profile.model_instance.clone(),
                 &outcome.action_trace,
                 engine.clone(),
             ) {
+                debug_generated_route(
+                    metadata.spec_name,
+                    profile.label,
+                    "trace_validation",
+                    binding_name,
+                    profile.model_instance.label(),
+                    "error",
+                    paths[state_index]
+                        .iter()
+                        .map(|step| &step.action)
+                        .chain(std::iter::once(&action)),
+                    None,
+                    None,
+                    None,
+                );
                 persist_failure::<Spec>(
                     metadata,
                     profile,
@@ -2980,246 +3434,47 @@ where
                 )?;
                 return Err(HarnessError::Refinement(error.to_string()));
             }
-        }
-    }
-    Ok(())
-}
-
-fn run_kani_bounded<Spec, Binding>(
-    spec: &Spec,
-    metadata: &GeneratedSpecMetadata,
-    profile: &TestProfile<Spec>,
-    binding_name: &str,
-    artifact_dir: &ArtifactDirPolicy,
-    depth: usize,
-) -> Result<(), HarnessError>
-where
-    Spec: SpecOracle + TemporalSpec,
-    Spec::State: Clone
-        + PartialEq
-        + FiniteModelDomain
-        + Serialize
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
-    Spec::Action: Clone + PartialEq + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Spec::ExpectedOutput:
-        Clone + Debug + PartialEq + Eq + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Binding: GeneratedBinding<Spec>,
-{
-    for (obligation_id, actions) in collect_kani_obligations(spec, profile, depth)? {
-        let (detail, action_trace) =
-            execute_action_sequence::<Spec, Binding>(spec, &profile.seeds, &actions)?;
-        if let Err(error) = validate_observed_action_trace(spec, &action_trace) {
-            persist_failure_with_context::<Spec>(
-                metadata,
-                profile,
-                "kani_bounded",
-                Some(binding_name),
-                Some(&obligation_id),
+            debug_generated_route(
+                metadata.spec_name,
+                profile.label,
+                "trace_validation",
+                binding_name,
+                profile.model_instance.label(),
+                "ok",
+                paths[state_index]
+                    .iter()
+                    .map(|step| &step.action)
+                    .chain(std::iter::once(&action)),
                 None,
-                artifact_dir,
-                &detail,
-                &action_trace,
-            )?;
-            return Err(error);
+                None,
+                None,
+            );
+            if successful_replay.is_none() {
+                successful_replay = Some((outcome.detail.clone(), outcome.action_trace.clone()));
+            }
         }
     }
-
-    Ok(())
-}
-
-pub fn run_kani_obligation_slot<Spec, Binding>(
-    spec: &Spec,
-    metadata: &GeneratedSpecMetadata,
-    profile: &TestProfile<Spec>,
-    binding_name: &str,
-    artifact_dir: &ArtifactDirPolicy,
-    depth: usize,
-    slot: usize,
-) -> Result<(), HarnessError>
-where
-    Spec: SpecOracle + TemporalSpec,
-    Spec::State: Clone
-        + PartialEq
-        + FiniteModelDomain
-        + Serialize
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
-    Spec::Action: Clone + PartialEq + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Spec::ExpectedOutput:
-        Clone + Debug + PartialEq + Eq + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Binding: GeneratedBinding<Spec>,
-{
-    let Some((obligation_id, actions)) = collect_kani_obligations(spec, profile, depth)?
-        .into_iter()
-        .nth(slot)
-    else {
-        return Ok(());
-    };
-    let (detail, action_trace) =
-        execute_action_sequence::<Spec, Binding>(spec, &profile.seeds, &actions)?;
-    if let Err(error) = validate_observed_action_trace(spec, &action_trace) {
-        persist_failure_with_context::<Spec>(
-            metadata,
-            profile,
-            "kani_bounded",
-            Some(binding_name),
-            Some(&obligation_id),
-            None,
-            artifact_dir,
-            &detail,
-            &action_trace,
-        )?;
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub fn run_kani_obligation_by_id<Spec, Binding>(
-    spec: &Spec,
-    metadata: &GeneratedSpecMetadata,
-    profile: &TestProfile<Spec>,
-    binding_name: &str,
-    artifact_dir: &ArtifactDirPolicy,
-    depth: usize,
-    obligation_id: &str,
-) -> Result<(), HarnessError>
-where
-    Spec: SpecOracle + TemporalSpec,
-    Spec::State: Clone
-        + PartialEq
-        + FiniteModelDomain
-        + Serialize
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
-    Spec::Action: Clone + PartialEq + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Spec::ExpectedOutput:
-        Clone + Debug + PartialEq + Eq + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Binding: GeneratedBinding<Spec>,
-{
-    let (_, actions) = collect_kani_obligations(spec, profile, depth)?
-        .into_iter()
-        .find(|candidate| candidate.0 == obligation_id)
-        .ok_or_else(|| {
-            HarnessError::Binding(format!(
-                "kani bounded obligation `{obligation_id}` was not found"
-            ))
-        })?;
-    let (detail, action_trace) =
-        execute_action_sequence::<Spec, Binding>(spec, &profile.seeds, &actions)?;
-    if let Err(error) = validate_observed_action_trace(spec, &action_trace) {
-        persist_failure_with_context::<Spec>(
-            metadata,
-            profile,
-            "kani_bounded",
-            Some(binding_name),
-            Some(obligation_id),
-            None,
-            artifact_dir,
-            &detail,
-            &action_trace,
-        )?;
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub fn run_materialized_kani_obligation<Spec, Binding>(
-    spec: &Spec,
-    metadata: &GeneratedSpecMetadata,
-    profile: &TestProfile<Spec>,
-    binding_name: &str,
-    artifact_dir: &ArtifactDirPolicy,
-    obligation_id: &str,
-    actions: &[Spec::Action],
-) -> Result<(), HarnessError>
-where
-    Spec: SpecOracle + TemporalSpec,
-    Spec::State: Clone
-        + PartialEq
-        + FiniteModelDomain
-        + Serialize
-        + DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
-    Spec::Action: Clone + PartialEq + Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Spec::ExpectedOutput:
-        Clone + Debug + PartialEq + Eq + Serialize + DeserializeOwned + Send + Sync + 'static,
-    Binding: GeneratedBinding<Spec>,
-{
-    let (detail, action_trace) =
-        execute_action_sequence::<Spec, Binding>(spec, &profile.seeds, actions)?;
-    if let Err(error) = validate_observed_action_trace(spec, &action_trace) {
-        persist_failure_with_context::<Spec>(
-            metadata,
-            profile,
-            "kani_bounded",
-            Some(binding_name),
-            Some(obligation_id),
-            None,
-            artifact_dir,
-            &detail,
-            &action_trace,
-        )?;
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub fn collect_kani_obligations<Spec>(
-    spec: &Spec,
-    profile: &TestProfile<Spec>,
-    depth: usize,
-) -> Result<Vec<(String, Vec<Spec::Action>)>, HarnessError>
-where
-    Spec: SpecOracle + TemporalSpec,
-    Spec::State: Clone + PartialEq + FiniteModelDomain + Send + Sync + 'static,
-    Spec::Action: Clone + PartialEq + Send + Sync + 'static,
-{
-    let lowered = lower_spec(spec)?;
-    let planner =
-        ExplicitObligationPlanner::with_config(ModelCheckConfig::bounded_lasso(depth.max(1) + 1));
-    let obligations = planner
-        .obligations(
-            &lowered,
-            &profile.model_instance,
-            &planner_coverage_goals(&profile.coverage),
-            &planner_seed_profile(&profile.seeds),
-        )
-        .map_err(|error| {
-            HarnessError::Refinement(format!("kani bounded planning failed: {error:?}"))
-        })?;
-
-    let mut seen = Vec::<Vec<Spec::Action>>::new();
-    let mut selected = Vec::new();
-    for obligation in obligations {
-        let PlannedObligationKind::ExplicitTraceCover { trace, .. } = obligation.kind else {
-            continue;
+    if let Some((detail, action_trace)) = successful_replay {
+        let bundle = GeneratedReplayBundle {
+            spec_name: metadata.spec_name.to_owned(),
+            profile: profile.label.to_owned(),
+            engine: "trace_validation".to_owned(),
+            binding: Some(binding_name.to_owned()),
+            obligation_id: None,
+            schedule: None,
+            seed: Some(seed_metadata(&profile.seeds)),
+            detail,
+            action_trace,
         };
-        let actions = trace
-            .steps()
-            .iter()
-            .filter_map(|step| match step {
-                TraceStep::Action(action) => Some(action.clone()),
-                TraceStep::Stutter => None,
-            })
-            .take(depth.max(1))
-            .collect::<Vec<_>>();
-        if actions.is_empty() || seen.iter().any(|candidate| candidate == &actions) {
-            continue;
-        }
-        seen.push(actions.clone());
-        selected.push((obligation.id, actions));
+        let _ = write_replay_bundle(
+            artifact_dir,
+            metadata.spec_slug,
+            profile.label,
+            "trace_validation",
+            &bundle,
+        )?;
     }
-
-    Ok(selected)
+    Ok(())
 }
 
 fn lower_spec<Spec>(
@@ -4193,39 +4448,13 @@ where
         detail: detail.clone(),
         action_trace: action_trace.clone(),
     };
-    if engine.starts_with("kani_") || engine == "kani_bounded" {
-        let normalized = NormalizedReplayBundle::from_kani_concrete(
-            metadata.spec_name,
-            profile.label,
-            engine,
-            KaniConcretePlayback {
-                detail: serde_json::to_value(detail).map_err(|error| {
-                    HarnessError::Artifact(format!("failed to encode kani replay detail: {error}"))
-                })?,
-                action_trace: serde_json::to_value(action_trace).map_err(|error| {
-                    HarnessError::Artifact(format!(
-                        "failed to encode kani replay action trace: {error}"
-                    ))
-                })?,
-            },
-        );
-        let _ = write_serialized_replay_bundle(
-            artifact_dir,
-            metadata.spec_slug,
-            profile.label,
-            engine,
-            &normalized,
-            detail,
-        )?;
-    } else {
-        let _ = write_replay_bundle(
-            artifact_dir,
-            metadata.spec_slug,
-            profile.label,
-            engine,
-            &bundle,
-        )?;
-    }
+    let _ = write_replay_bundle(
+        artifact_dir,
+        metadata.spec_slug,
+        profile.label,
+        engine,
+        &bundle,
+    )?;
     Ok(())
 }
 
@@ -4309,7 +4538,7 @@ fn write_schedule_artifact<Spec>(
     engine: &EnginePlan,
     artifact_dir: &ArtifactDirPolicy,
     schedule: Option<&Value>,
-) -> Result<(), HarnessError>
+) -> Result<PathBuf, HarnessError>
 where
     Spec: FrontendSpec,
 {
@@ -4325,7 +4554,7 @@ where
         "json",
     );
     fs::write(
-        path,
+        &path,
         serde_json::to_vec_pretty(&json!({
             "spec_name": metadata.spec_name,
             "profile": profile.label,
@@ -4341,7 +4570,7 @@ where
     .map_err(|error| {
         HarnessError::Artifact(format!("failed to write schedule artifact: {error}"))
     })?;
-    Ok(())
+    Ok(path)
 }
 
 fn sanitize_path(raw: &str) -> String {
@@ -4795,44 +5024,6 @@ mod tests {
             true,
         )
         .expect("explicit profile should pass");
-    }
-
-    #[test]
-    fn kani_bounded_requires_materialized_harnesses() {
-        let spec = DemoSpec;
-        let profile = TestProfile {
-            label: "kani_default",
-            model_instance: ModelInstance::new("demo"),
-            seeds: small::<DemoSpec>().with_fixture_factory(demo_factory),
-            coverage: vec![CoverageGoal::Transitions],
-            engines: vec![EnginePlan::KaniBounded { depth: 4 }],
-        };
-        let metadata = GeneratedSpecMetadata {
-            spec_name: "DemoSpec",
-            spec_slug: "DemoSpec",
-            export_module: "crate::generated",
-            crate_package: "nirvash-conformance",
-            crate_manifest_dir: env!("CARGO_MANIFEST_DIR"),
-            normalized_fragment: normalized_fragment_info(&spec),
-            default_profiles: &["kani_default"],
-        };
-        let error = run_profile::<DemoSpec, DemoBinding>(
-            &spec,
-            &metadata,
-            &profile,
-            "crate::DemoBinding",
-            &ArtifactDirPolicy {
-                base: std::env::temp_dir().join("nirvash_conformance_kani_runtime"),
-            },
-            true,
-        )
-        .expect_err("runtime Kani profile should require materialization");
-
-        assert!(
-            error
-                .to_string()
-                .contains("cargo nirvash materialize-tests --spec DemoSpec --binding crate::DemoBinding --profile kani_default")
-        );
     }
 
     #[test]

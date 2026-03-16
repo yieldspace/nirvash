@@ -1,0 +1,5 @@
+error: Kani support was removed; use explicit/proptest/trace/loom/shuttle or replay materialization
+ --> tests/fixtures/code_tests_kani_engine_removed.rs:7:24
+  |
+7 |             engines = [kani(depth = 4)],
+  |                        ^^^^

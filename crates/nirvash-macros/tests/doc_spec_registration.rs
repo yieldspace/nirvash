@@ -36,7 +36,9 @@ impl FrontendSpec for DocSpec {
         vec![Action::Start]
     }
 
-    fn transition_program(&self) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
+    fn transition_program(
+        &self,
+    ) -> Option<::nirvash::TransitionProgram<Self::State, Self::Action>> {
         Some(nirvash_transition_program! {
             rule start when matches!(action, Action::Start) && !prev.busy => {
                 set busy <= true;
@@ -63,5 +65,8 @@ fn doc_spec_registers_transition_doc_provider_without_formal_tests() {
     assert_eq!(bundle.structure_cases.len(), 1);
     assert!(!bundle.reachability_cases.is_empty());
     assert_eq!(bundle.reachability_cases[0].label, "focused");
-    assert_eq!(bundle.reachability_cases[0].surface.as_deref(), Some("docs"));
+    assert_eq!(
+        bundle.reachability_cases[0].surface.as_deref(),
+        Some("docs")
+    );
 }

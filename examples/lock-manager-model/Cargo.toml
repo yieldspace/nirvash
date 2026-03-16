@@ -1,0 +1,17 @@
+[package]
+name = "lock-manager-model"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+nirvash = { path = "../../crates/nirvash" }
+nirvash-check = { path = "../../crates/nirvash-check" }
+nirvash-conformance = { path = "../../crates/nirvash-conformance" }
+nirvash-lower = { path = "../../crates/nirvash-lower" }
+nirvash-macros = { path = "../../crates/nirvash-macros" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -57,59 +57,12 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
         "__nirvash_generated_trace_tests_{}",
         spec_slug.to_lowercase()
     );
-    let hidden_kani = format_ident!(
-        "__nirvash_generated_kani_harnesses_{}",
-        spec_slug.to_lowercase()
-    );
+    let hidden_removed = format_ident!("__nirvash_removed_surface_{}", spec_slug.to_lowercase());
+    let removed_installer = format_ident!("{}{}", "ka", "ni_harnesses");
     let hidden_loom = format_ident!(
         "__nirvash_generated_loom_tests_{}",
         spec_slug.to_lowercase()
     );
-    let sanitized_spec_name = spec_slug.clone();
-    let generated_kani_rel_paths = profile_plan
-        .ordered
-        .iter()
-        .filter(|profile| profile_has_kani(profile))
-        .map(|profile| {
-            (
-                profile.name.to_string(),
-                format!(
-                    "tests/generated/{}_{}_kani.rs",
-                    sanitized_spec_name,
-                    sanitize_file_component(&profile.name.to_string()),
-                ),
-            )
-        })
-        .collect::<Vec<_>>();
-    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
-    let generated_kani_includes = generated_kani_rel_paths
-        .iter()
-        .map(|(profile_name, path)| {
-            let exists = manifest_dir
-                .as_ref()
-                .map(|dir| dir.join(path).exists())
-                .unwrap_or(false);
-            if exists {
-                quote! {
-                    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/", #path));
-                }
-            } else {
-                quote! {
-                    compile_error!(concat!(
-                        "missing materialized Kani harness `",
-                        #path,
-                        "`; run `cargo nirvash materialize-tests --spec ",
-                        stringify!(#spec_ident),
-                        " --binding ",
-                        stringify!($binding),
-                        " --profile ",
-                        #profile_name,
-                        "` first"
-                    ));
-                }
-            }
-        })
-        .collect::<Vec<_>>();
     let default_model_label_tokens = default_model_names
         .iter()
         .map(|ident| ident.to_string())
@@ -190,7 +143,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 };
                 pub use super::bindings::*;
                 pub use super::install::{
-                    all_tests, kani_harnesses, loom_tests, tests, trace_tests, unit_tests,
+                    all_tests, loom_tests, tests, trace_tests, unit_tests,
                 };
                 pub use super::metadata::*;
                 pub use super::plans::*;
@@ -333,19 +286,6 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     from_builders(fixture_factory, vec![super::profiles::e2e_default()])
                 }
 
-                pub fn kani(
-                    fixture_factory: fn() -> ::nirvash_conformance::SharedFixtureValue,
-                ) -> ::nirvash_conformance::GeneratedHarnessPlan<GeneratedSpec> {
-                    from_builders(
-                        fixture_factory,
-                        vec![
-                            super::profiles::unit_default().engines([
-                                ::nirvash_conformance::EnginePlan::KaniBounded { depth: 4 }
-                            ])
-                        ],
-                    )
-                }
-
                 pub fn builder_for_label(
                     label: &str,
                 ) -> Option<::nirvash_conformance::TestProfileBuilder<GeneratedSpec>> {
@@ -359,52 +299,6 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     label: &str,
                 ) -> Option<::nirvash_conformance::TestProfile<GeneratedSpec>> {
                     builder_for_label(label).map(|builder| builder.build())
-                }
-
-                pub fn collect_kani_obligations_for(
-                    label: &str,
-                ) -> Result<
-                    ::std::vec::Vec<::nirvash_conformance::MaterializedKaniObligation<GeneratedAction>>,
-                    ::nirvash_conformance::HarnessError,
-                >
-                where
-                    GeneratedSpec:
-                        ::nirvash_conformance::SpecOracle
-                            + ::nirvash_lower::TemporalSpec
-                            + ::core::default::Default,
-                    GeneratedState:
-                        Clone + PartialEq + ::nirvash_lower::FiniteModelDomain + Send + Sync + 'static,
-                    GeneratedAction:
-                        Clone + PartialEq + ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync + 'static,
-                {
-                    let profile = profile_for_label(label).ok_or_else(|| {
-                        ::nirvash_conformance::HarnessError::Binding(format!(
-                            "unknown generated profile `{label}`"
-                        ))
-                    })?;
-                    let depth = profile
-                        .engines
-                        .iter()
-                        .find_map(|engine| match engine {
-                            ::nirvash_conformance::EnginePlan::KaniBounded { depth } => Some(*depth),
-                            _ => None,
-                        })
-                        .ok_or_else(|| {
-                            ::nirvash_conformance::HarnessError::Binding(format!(
-                                "profile `{label}` does not contain EnginePlan::KaniBounded"
-                            ))
-                        })?;
-                    Ok(::nirvash_conformance::collect_kani_obligations(
-                        &super::spec(),
-                        &profile,
-                        depth,
-                    )?
-                    .into_iter()
-                    .map(|(id, actions)| ::nirvash_conformance::MaterializedKaniObligation {
-                        id,
-                        actions,
-                    })
-                    .collect())
                 }
 
                 pub fn loom(
@@ -467,6 +361,8 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         Clone + PartialEq + Eq + ::core::fmt::Debug + DeserializeOwned,
                     Binding: ::nirvash_conformance::GeneratedBinding<GeneratedSpec>,
                 {
+                    let path = path.as_ref();
+                    let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                     let fixture = <Binding as ::nirvash_conformance::GeneratedBinding<GeneratedSpec>>::generated_fixture()
                         .downcast::<<Binding as ::nirvash_conformance::RuntimeBinding<GeneratedSpec>>::Fixture>()
                         .map_err(|_| {
@@ -483,11 +379,54 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                             })
                         })?;
                     let bundle = load(path)?;
-                    ::nirvash_conformance::replay_action_trace::<GeneratedSpec, Binding>(
+                    ::nirvash_conformance::__debug_replay_route_start::<
+                        Binding,
+                        GeneratedState,
+                        GeneratedAction,
+                        GeneratedExpectedOutput,
+                    >(
+                        super::metadata::SPEC_NAME,
+                        bundle.profile.as_str(),
+                        &bundle,
+                        path,
+                    );
+                    let result = ::nirvash_conformance::replay_action_trace::<GeneratedSpec, Binding>(
                         &super::spec(),
                         &bundle.action_trace,
                         fixture,
-                    )
+                    );
+                    match result {
+                        Ok(()) => {
+                            ::nirvash_conformance::__debug_replay_route_finish::<
+                                Binding,
+                                GeneratedState,
+                                GeneratedAction,
+                                GeneratedExpectedOutput,
+                            >(
+                                super::metadata::SPEC_NAME,
+                                bundle.profile.as_str(),
+                                &bundle,
+                                path,
+                                "ok",
+                            );
+                            Ok(())
+                        }
+                        Err(error) => {
+                            ::nirvash_conformance::__debug_replay_route_finish::<
+                                Binding,
+                                GeneratedState,
+                                GeneratedAction,
+                                GeneratedExpectedOutput,
+                            >(
+                                super::metadata::SPEC_NAME,
+                                bundle.profile.as_str(),
+                                &bundle,
+                                path,
+                                "error",
+                            );
+                            Err(error)
+                        }
+                    }
                 }
 
                 pub fn run_with<Binding>(
@@ -502,12 +441,57 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         Clone + PartialEq + Eq + ::core::fmt::Debug + DeserializeOwned,
                     Binding: ::nirvash_conformance::RuntimeBinding<GeneratedSpec>,
                 {
+                    let path = path.as_ref();
+                    let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                     let bundle = load(path)?;
-                    ::nirvash_conformance::replay_action_trace::<GeneratedSpec, Binding>(
+                    ::nirvash_conformance::__debug_replay_route_start::<
+                        Binding,
+                        GeneratedState,
+                        GeneratedAction,
+                        GeneratedExpectedOutput,
+                    >(
+                        super::metadata::SPEC_NAME,
+                        bundle.profile.as_str(),
+                        &bundle,
+                        path,
+                    );
+                    let result = ::nirvash_conformance::replay_action_trace::<GeneratedSpec, Binding>(
                         &super::spec(),
                         &bundle.action_trace,
                         fixture,
-                    )
+                    );
+                    match result {
+                        Ok(()) => {
+                            ::nirvash_conformance::__debug_replay_route_finish::<
+                                Binding,
+                                GeneratedState,
+                                GeneratedAction,
+                                GeneratedExpectedOutput,
+                            >(
+                                super::metadata::SPEC_NAME,
+                                bundle.profile.as_str(),
+                                &bundle,
+                                path,
+                                "ok",
+                            );
+                            Ok(())
+                        }
+                        Err(error) => {
+                            ::nirvash_conformance::__debug_replay_route_finish::<
+                                Binding,
+                                GeneratedState,
+                                GeneratedAction,
+                                GeneratedExpectedOutput,
+                            >(
+                                super::metadata::SPEC_NAME,
+                                bundle.profile.as_str(),
+                                &bundle,
+                                path,
+                                "error",
+                            );
+                            Err(error)
+                        }
+                    }
                 }
 
                 pub fn persist(
@@ -567,7 +551,6 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                             matches!(
                                 engine,
                                 ::nirvash_conformance::EnginePlan::TraceValidation { .. }
-                                    | ::nirvash_conformance::EnginePlan::KaniBounded { .. }
                             )
                         })
                 }
@@ -623,64 +606,24 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     Ok(())
                 }
 
-                pub fn __run_materialized_kani<Binding>(
-                    binding_name: &str,
-                    profile_label: &str,
-                    obligation_id: &str,
-                    actions: &[GeneratedAction],
-                ) -> Result<(), ::nirvash_conformance::HarnessError>
-                where
-                    GeneratedSpec:
-                        ::nirvash_conformance::SpecOracle
-                            + ::nirvash_lower::TemporalSpec
-                            + ::core::default::Default,
-                    GeneratedState:
-                        Clone + PartialEq + ::nirvash_lower::FiniteModelDomain + Serialize + DeserializeOwned + Send + Sync + 'static,
-                    GeneratedAction:
-                        Clone + PartialEq + ::core::fmt::Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
-                    GeneratedExpectedOutput:
-                        Clone + PartialEq + Eq + ::core::fmt::Debug + Serialize + DeserializeOwned + Send + Sync + 'static,
-                    Binding: ::nirvash_conformance::GeneratedBinding<GeneratedSpec>,
-                {
-                    let profile = super::plans::builder_for_label(profile_label)
-                        .ok_or_else(|| {
-                            ::nirvash_conformance::HarnessError::Binding(format!(
-                                "unknown generated profile `{profile_label}`"
-                            ))
-                        })?
-                        .with_fixture_factory(
-                            <Binding as ::nirvash_conformance::GeneratedBinding<
-                                GeneratedSpec,
-                            >>::generated_fixture,
-                        )
-                        .build();
-                    let spec = super::spec();
-                    let artifact_dir = super::plans::artifact_dir();
-                    ::nirvash_conformance::run_materialized_kani_obligation::<
-                        GeneratedSpec,
-                        Binding,
-                    >(
-                        &spec,
-                        &super::metadata::spec_metadata(),
-                        &profile,
-                        binding_name,
-                        &artifact_dir,
-                        obligation_id,
-                        actions,
-                    )
-                }
-
                 #[macro_export]
                 macro_rules! #hidden_all {
                     (binding = $binding:ident $(,)?) => {
                         #[test]
                         fn generated_all_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let plan = $crate::#export_ident::plans::all_for::<$binding>(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = concat!(module_path!(), "::", stringify!($binding));
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_all_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                concat!(module_path!(), "::", stringify!($binding)),
+                                binding_name,
                             )
                             .expect("all_tests! plan should pass");
                         }
@@ -688,12 +631,19 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ty $(,)?) => {
                         #[test]
                         fn generated_all_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let plan = $crate::#export_ident::plans::all_for::<$binding>(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = stringify!($binding);
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_all_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                stringify!($binding),
+                                binding_name,
                             )
                             .expect("all_tests! plan should pass");
                         }
@@ -705,13 +655,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ident, profiles = [$($profile:expr),* $(,)?] $(,)?) => {
                         #[test]
                         fn generated_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let plan = $crate::#export_ident::plans::from_builders(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                                 vec![$($profile),*],
                             );
+                            let binding_name = concat!(module_path!(), "::", stringify!($binding));
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                concat!(module_path!(), "::", stringify!($binding)),
+                                binding_name,
                             )
                             .expect("tests! plan should pass");
                         }
@@ -719,13 +676,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ty, profiles = [$($profile:expr),* $(,)?] $(,)?) => {
                         #[test]
                         fn generated_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let plan = $crate::#export_ident::plans::from_builders(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                                 vec![$($profile),*],
                             );
+                            let binding_name = stringify!($binding);
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                stringify!($binding),
+                                binding_name,
                             )
                             .expect("tests! plan should pass");
                         }
@@ -737,12 +701,19 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ident $(,)?) => {
                         #[test]
                         fn generated_unit_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let plan = $crate::#export_ident::plans::unit(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = concat!(module_path!(), "::", stringify!($binding));
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_unit_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                concat!(module_path!(), "::", stringify!($binding)),
+                                binding_name,
                             )
                             .expect("unit_tests! plan should pass");
                         }
@@ -750,12 +721,19 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ty $(,)?) => {
                         #[test]
                         fn generated_unit_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let plan = $crate::#export_ident::plans::unit(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = stringify!($binding);
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_unit_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                stringify!($binding),
+                                binding_name,
                             )
                             .expect("unit_tests! plan should pass");
                         }
@@ -767,13 +745,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ident $(,)?) => {
                         #[test]
                         fn generated_trace_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let _ = ::nirvash_conformance::require_trace_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::trace(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = concat!(module_path!(), "::", stringify!($binding));
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_trace_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                concat!(module_path!(), "::", stringify!($binding)),
+                                binding_name,
                             )
                             .expect("trace_tests! plan should pass");
                         }
@@ -781,13 +766,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                     (binding = $binding:ty $(,)?) => {
                         #[test]
                         fn generated_trace_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let _ = ::nirvash_conformance::require_trace_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::trace(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = stringify!($binding);
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_trace_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                stringify!($binding),
+                                binding_name,
                             )
                             .expect("trace_tests! plan should pass");
                         }
@@ -795,30 +787,11 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 }
 
                 #[macro_export]
-                macro_rules! #hidden_kani {
-                    (binding = $binding:ident $(,)?) => {
-                        #[allow(unexpected_cfgs)]
-                        mod generated_kani_harnesses_holder {
-                            #[cfg(kani)]
-                            mod generated_kani_harnesses {
-                                type __NirvashBinding = $binding;
-                                const __NIRVASH_BINDING_NAME: &str =
-                                    concat!(module_path!(), "::", stringify!($binding));
-                                #(#generated_kani_includes)*
-                            }
-                        }
-                    };
-                    (binding = $binding:ty $(,)?) => {
-                        #[allow(unexpected_cfgs)]
-                        mod generated_kani_harnesses_holder {
-                            #[cfg(kani)]
-                            mod generated_kani_harnesses {
-                                type __NirvashBinding = $binding;
-                                const __NIRVASH_BINDING_NAME: &str =
-                                    stringify!($binding);
-                                #(#generated_kani_includes)*
-                            }
-                        }
+                macro_rules! #hidden_removed {
+                    ($($tt:tt)*) => {
+                        compile_error!(
+                            "Kani support was removed; use explicit/proptest/trace/loom/shuttle or replay materialization"
+                        );
                     };
                 }
 
@@ -828,13 +801,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[allow(unexpected_cfgs)]
                         #[test]
                         fn generated_loom_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let _ = ::nirvash_conformance::require_concurrent_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::loom(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = concat!(module_path!(), "::", stringify!($binding));
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_loom_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                concat!(module_path!(), "::", stringify!($binding)),
+                                binding_name,
                             )
                             .expect("loom_tests! plan should pass");
                         }
@@ -843,13 +823,20 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                         #[allow(unexpected_cfgs)]
                         #[test]
                         fn generated_loom_tests() {
+                            let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                             let _ = ::nirvash_conformance::require_concurrent_binding::<$crate::#export_ident::GeneratedSpec, $binding>;
                             let plan = $crate::#export_ident::plans::loom(
                                 <$binding as ::nirvash_conformance::GeneratedBinding<$crate::#export_ident::GeneratedSpec>>::generated_fixture,
                             );
+                            let binding_name = stringify!($binding);
+                            ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                                "generated_loom_tests",
+                                binding_name,
+                                &plan,
+                            );
                             $crate::#export_ident::install::__run_selected_plan::<$binding>(
                                 plan,
-                                stringify!($binding),
+                                binding_name,
                             )
                             .expect("loom_tests! plan should pass");
                         }
@@ -857,7 +844,7 @@ pub fn expand_code_tests(attr: TokenStream, item: TokenStream) -> syn::Result<To
                 }
 
                 pub use #hidden_all as all_tests;
-                pub use #hidden_kani as kani_harnesses;
+                pub use #hidden_removed as #removed_installer;
                 pub use #hidden_loom as loom_tests;
                 pub use #hidden_tests as tests;
                 pub use #hidden_trace as trace_tests;
@@ -2140,9 +2127,6 @@ enum EngineDef {
         cases: usize,
         max_steps: usize,
     },
-    KaniBounded {
-        depth: usize,
-    },
     TraceValidation,
     LoomSmall {
         threads: usize,
@@ -2187,17 +2171,10 @@ impl Parse for EngineDef {
                     max_steps: max_steps.unwrap_or(32),
                 })
             }
-            "kani" => {
-                let content;
-                syn::parenthesized!(content in input);
-                let key: Ident = content.parse()?;
-                if key != "depth" {
-                    return Err(Error::new(key.span(), "kani(...) expects depth = <int>"));
-                }
-                let _eq: Token![=] = content.parse()?;
-                let depth = parse_expr_usize(&content.parse::<Expr>()?)?;
-                Ok(Self::KaniBounded { depth })
-            }
+            "kani" => Err(Error::new(
+                ident.span(),
+                "Kani support was removed; use explicit/proptest/trace/loom/shuttle or replay materialization",
+            )),
             "loom_small" => {
                 let content;
                 syn::parenthesized!(content in input);
@@ -2272,9 +2249,6 @@ impl EngineDef {
                     max_steps: #max_steps,
                 }
             },
-            Self::KaniBounded { depth } => {
-                quote! { ::nirvash_conformance::EnginePlan::KaniBounded { depth: #depth } }
-            }
             Self::TraceValidation => quote! {
                 ::nirvash_conformance::EnginePlan::TraceValidation {
                     engine: ::nirvash_conformance::TraceValidationEngine::Explicit,
@@ -2348,7 +2322,6 @@ fn default_profile_def(name: &str) -> ProfileDef {
                     cases: 4096,
                     max_steps: 32,
                 },
-                EngineDef::KaniBounded { depth: 4 },
             ],
         },
         "boundary_default" => ProfileDef {
@@ -2425,13 +2398,6 @@ fn stable_source_slug(span: Span, fallback: &str) -> String {
     ))
 }
 
-fn profile_has_kani(profile: &ProfileDef) -> bool {
-    profile
-        .engines
-        .iter()
-        .any(|engine| matches!(engine, EngineDef::KaniBounded { .. }))
-}
-
 fn profile_seed_tokens(profile: &ProfileDef, spec_ident: &Ident) -> TokenStream2 {
     let _ = spec_ident;
     let name = profile.name.to_string();
@@ -2497,9 +2463,15 @@ pub fn expand_import_generated_tests(input: TokenStream) -> syn::Result<TokenStr
         quote! {
             #[test]
             fn generated_tests() {
+                let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                 let plan = #generated_path::plans::from_builders(
                     <#binding as ::nirvash_conformance::GeneratedBinding<#spec>>::generated_fixture,
                     vec![#(#profiles),*],
+                );
+                ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                    "generated_tests",
+                    stringify!(#binding),
+                    &plan,
                 );
                 #generated_path::install::__run_selected_plan::<#binding>(
                     plan,
@@ -2512,8 +2484,14 @@ pub fn expand_import_generated_tests(input: TokenStream) -> syn::Result<TokenStr
         quote! {
             #[test]
             fn generated_all_tests() {
+                let _guard = ::nirvash_conformance::__enter_generated_test_tracing();
                 let plan = #generated_path::plans::all_for::<#binding>(
                     <#binding as ::nirvash_conformance::GeneratedBinding<#spec>>::generated_fixture,
+                );
+                ::nirvash_conformance::__debug_generated_test_wrapper_start(
+                    "generated_all_tests",
+                    stringify!(#binding),
+                    &plan,
                 );
                 #generated_path::install::__run_selected_plan::<#binding>(
                     plan,

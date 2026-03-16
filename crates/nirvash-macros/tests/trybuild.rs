@@ -33,7 +33,6 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.pass("tests/fixtures/code_tests_custom_fixture_nonserializable_ok.rs");
     t.pass("tests/fixtures/code_tests_low_level_nested_installer_ok.rs");
     t.pass("tests/fixtures/code_tests_same_tail_specs_ok.rs");
-    t.pass("tests/fixtures/code_tests_kani_harness_ok.rs");
     t.pass("tests/fixtures/doc_spec_ok.rs");
     t.pass("tests/fixtures/doc_case_ok.rs");
     t.pass("tests/fixtures/derive_protocol_input_witness_ok.rs");
@@ -47,6 +46,8 @@ fn signature_derive_behaves_for_supported_inputs() {
     t.compile_fail("tests/fixtures/code_tests_legacy_args.rs");
     t.compile_fail("tests/fixtures/code_tests_missing_oracle.rs");
     t.compile_fail("tests/fixtures/code_tests_missing_projection.rs");
+    t.compile_fail("tests/fixtures/code_tests_kani_engine_removed.rs");
+    t.compile_fail("tests/fixtures/code_tests_kani_installer_removed.rs");
     t.compile_fail("tests/fixtures/code_tests_missing_trace_binding.rs");
     t.compile_fail("tests/fixtures/code_tests_missing_concurrency_marker.rs");
     t.compile_fail("tests/fixtures/old_macro_names.rs");

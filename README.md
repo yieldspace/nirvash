@@ -1,48 +1,97 @@
 # nirvash
 
-`nirvash` is a standalone Rust workspace for authoring, lowering, checking, replaying,
-and documenting executable transition-system specifications.
+`nirvash` is a standalone Rust workspace for writing and checking transition-system
+specifications in the style of TLA+, but with Rust types, macros, checkers, and runtime
+bindings.
 
-The repository keeps the formal-spec tooling, checker front doors, proof export surface,
-generated code-test harnesses, and the `cargo nirvash` CLI in one publishable workspace.
+It is not a TLA+ parser or a full compatibility layer. The core contract is:
 
-## Workspace Layout
+```text
+FrontendSpec + TemporalSpec -> LoweredSpec -> checker / conformance / proof / docgen
+```
+
+That shared boundary lets one authored system flow into explicit model checking, symbolic
+checking, generated runtime tests, proof export, and documentation generation without changing
+the spec.
+
+## Five-Minute Tour
+
+The shortest introduction is the lock-manager example:
+
+```bash
+cargo run --manifest-path examples/lock-manager-model/Cargo.toml
+```
+
+It models a tiny system with two clients and one shared lock:
+
+- `Request(client)` moves a client from `Idle` to `Waiting`
+- `Grant(client)` moves a waiting client to `Holding` when nobody else holds the lock
+- `Release(client)` returns the holder to `Idle`
+- an invariant enforces mutual exclusion
+
+The example binary lowers the Rust-authored spec, explores the full reachable graph, and prints
+one witness for a lock handoff from Alice to Bob:
+
+```text
+spec: lock_manager
+reachable states: 8
+holding states: 4
+sample handoff plan:
+  1. alice requests lock
+  2. alice granted lock
+  3. bob requests lock
+  4. alice releases lock
+  5. bob granted lock
+target state: LockState { alice: Idle, bob: Holding }
+```
+
+To verify the mock runtime against the same model:
+
+```bash
+cargo test --manifest-path examples/lock-manager-model/Cargo.toml -- --nocapture
+```
+
+If your shell already exports `RUST_LOG`, that value wins. Use `RUST_LOG=debug` to force
+the generated route logs on.
+
+That example includes:
+
+- a `FrontendSpec + TemporalSpec` model
+- a `#[nirvash_binding]` mock runtime
+- generated tests installed through `generated::install::all_tests!`
+- `tracing::debug!` route logs for generated test execution with `-- --nocapture`
+- reachable-graph exploration through `ExplicitModelChecker`
+
+## How The Workspace Fits Together
 
 - `crates/nirvash`
-  - Authoring facade crate with DSL entry points such as `pred!`, `step!`, `ltl!`,
-    `TransitionProgram`, and DocGraph helpers.
-- `crates/nirvash-foundation`
-  - Shared finite-domain and symbolic-encoding traits.
-- `crates/nirvash-ir`
-  - Backend-neutral lowered core and proof obligation types.
+  - Rust-first authoring facade with DSL entry points such as `pred!`, `step!`, `ltl!`,
+    `TransitionProgram`, and DocGraph helpers
 - `crates/nirvash-lower`
-  - Lowering boundary and checker-facing shared API centered on `LoweredSpec`.
+  - Canonical lowering boundary centered on `LoweredSpec`
 - `crates/nirvash-check`
-  - Explicit and symbolic checker front doors.
-- `crates/nirvash-backends`
-  - Explicit and SMT-backed backend implementations.
+  - Stable explicit and symbolic checker front doors
 - `crates/nirvash-conformance`
-  - Runtime replay, generated harness plans, and test adapters.
+  - Runtime replay, generated harness plans, and adapters for generated tests
 - `crates/nirvash-proof`
-  - Proof bundle export and certificate-oriented types.
+  - Proof bundle export and certificate-oriented types
 - `crates/nirvash-docgen`
-  - Rustdoc-oriented doc graph and Mermaid generation helpers.
+  - Rustdoc-oriented doc graph and Mermaid generation helpers
 - `crates/nirvash-macros`
-  - Proc macros for derive support, registry wiring, subsystem specs, and generated tests.
+  - Proc macros for derives, subsystem specs, runtime bindings, and generated tests
 - `crates/cargo-nirvash`
-  - `cargo nirvash` subcommand implementation.
+  - `cargo nirvash` subcommand implementation
 
-## Core Boundary
+For the authoring facade and the full architecture diagrams, see
+[`crates/nirvash/README.md`](crates/nirvash/README.md).
 
-`nirvash` keeps one shared execution boundary:
+## Examples
 
-- Author specs against `FrontendSpec`, `TemporalSpec`, and the DSL surface in `nirvash`.
-- Lower authored semantics through `nirvash-lower` into `LoweredSpec`.
-- Feed `LoweredSpec` into the checker, conformance, proof, and documentation crates.
-
-This keeps authoring concerns separate from execution backends while preserving one
-canonical lowered representation for explicit checking, symbolic checking, replay, and proof
-export.
+- `examples/lock-manager-model`
+  - Smallest end-to-end example for TLA+-style system modeling in Rust
+- `examples/docker-compose-model`
+  - Larger example that adds docgen output, a richer runtime, and a more operational state
+    machine
 
 ## Tooling
 
@@ -50,8 +99,9 @@ export.
 - `cargo nirvash materialize-tests`
 - `cargo nirvash replay`
 
-Generated artifacts are written under `target/nirvash/{manifest,replay}` and materialized
-test files are written to `tests/generated`.
+Generated artifacts are written under `target/nirvash/{manifest,replay}`. Materialized
+replay files are written to `tests/generated/*.rs`, and `tests/generated.rs` is refreshed
+so Cargo can run them as an integration test crate.
 
 ## Development
 
@@ -65,7 +115,7 @@ For the first standalone `0.1.0` line, unpublished sibling crates are still reso
 temporary local `[patch.crates-io]` overlay during packaging. The CI workflow generates that
 overlay before running the workspace `cargo package` step.
 
-Optional engines such as `kani`, `loom`, and `shuttle` remain opt-in. The default workspace
+Optional engines such as `loom` and `shuttle` remain opt-in. The default workspace
 checks do not require them.
 
 ## License

@@ -1,13 +1,13 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
 };
 
-use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
+use anyhow::{Context, Result, anyhow, bail};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -25,40 +25,98 @@ pub struct MaterializeRequest {
     pub replay: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ManifestRecord {
-    #[serde(alias = "spec_name")]
     pub spec: String,
-    #[serde(default)]
     pub spec_slug: String,
-    #[serde(default)]
     pub spec_path: String,
     pub export_module: String,
-    #[serde(default)]
     pub crate_package: String,
-    #[serde(default)]
     pub crate_manifest_dir: String,
-    #[serde(default)]
     pub default_profiles: Vec<String>,
-    #[serde(alias = "binding_path")]
     pub binding: String,
     pub profile: String,
-    #[serde(default, alias = "engines")]
     pub engine: Value,
-    #[serde(default)]
     pub coverage: Vec<Value>,
-    #[serde(default)]
     pub replay_dir: Option<String>,
-    #[serde(default)]
     pub materialize_failures: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct KaniObligationRecord {
+#[derive(Debug, Deserialize)]
+struct RawManifestRecord {
+    #[serde(alias = "spec_name")]
+    spec: String,
+    #[serde(default)]
+    spec_slug: String,
+    #[serde(default)]
+    spec_path: String,
+    export_module: String,
+    #[serde(default)]
+    crate_package: String,
+    #[serde(default)]
+    crate_manifest_dir: String,
+    #[serde(default)]
+    default_profiles: Vec<String>,
+    #[serde(default)]
+    binding: Option<String>,
+    #[serde(default)]
+    binding_path: Option<String>,
     profile: String,
-    depth: usize,
-    obligation_id: String,
-    actions: Value,
+    #[serde(default, alias = "engines")]
+    engine: Value,
+    #[serde(default)]
+    coverage: Vec<Value>,
+    #[serde(default)]
+    replay_dir: Option<String>,
+    #[serde(default)]
+    materialize_failures: bool,
+}
+
+impl<'de> Deserialize<'de> for ManifestRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = RawManifestRecord::deserialize(deserializer)?;
+        let binding = match (raw.binding, raw.binding_path) {
+            (Some(binding), Some(binding_path)) if binding == binding_path => binding,
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "manifest fields `binding` and `binding_path` disagree",
+                ));
+            }
+            (Some(binding), None) | (None, Some(binding)) => binding,
+            (None, None) => {
+                return Err(serde::de::Error::custom(
+                    "manifest must contain `binding` or `binding_path`",
+                ));
+            }
+        };
+        let binding = normalize_binding_path(&binding);
+
+        Ok(Self {
+            spec: raw.spec,
+            spec_slug: raw.spec_slug,
+            spec_path: raw.spec_path,
+            export_module: raw.export_module,
+            crate_package: raw.crate_package,
+            crate_manifest_dir: raw.crate_manifest_dir,
+            default_profiles: raw.default_profiles,
+            binding,
+            profile: raw.profile,
+            engine: raw.engine,
+            coverage: raw.coverage,
+            replay_dir: raw.replay_dir,
+            materialize_failures: raw.materialize_failures,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProfileRecord {
+    profile: String,
+    engine: Value,
+    coverage: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,16 +153,19 @@ pub fn list_tests(base: impl AsRef<Path>, filter: &ManifestFilter) -> Result<Vec
         return Ok(manifests);
     }
 
-    for path in read_json_files(&manifest_dir)? {
+    let mut manifest_paths = read_json_files(&manifest_dir)?;
+    manifest_paths.sort();
+    for path in manifest_paths {
         let manifest: ManifestRecord = serde_json::from_slice(
             &fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?,
         )
         .with_context(|| format!("failed to decode manifest {}", path.display()))?;
-        if manifest_matches(&manifest, filter) {
-            manifests.push(manifest);
-        }
+        manifests.push(manifest);
     }
 
+    manifests = dedupe_manifests(manifests);
+    manifests = augment_default_profiles(base.as_ref(), manifests, filter)?;
+    manifests.retain(|manifest| manifest_matches(manifest, filter));
     manifests.sort_by(|lhs, rhs| {
         lhs.spec
             .cmp(&rhs.spec)
@@ -147,37 +208,32 @@ pub fn materialize_tests(
         fs::create_dir_all(&materialized_dir)
             .with_context(|| format!("failed to create {}", materialized_dir.display()))?;
         let replay_path = if let Some(path) = replay_override.clone() {
-            path
+            Some(path)
         } else {
-            latest_matching_replay_bundle(base, &manifest)?
+            latest_matching_replay_bundle(base, &manifest).ok()
         };
-        let output_path = materialized_dir.join(format!(
-            "{}_{}_replay.rs",
-            sanitize_path(manifest_spec_stem(&manifest)),
-            sanitize_path(&manifest.profile),
-        ));
-        fs::write(
-            &output_path,
-            render_materialized_test(&manifest, &replay_path),
-        )
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-        paths.push(output_path);
-
-        if manifest_has_kani(&manifest.engine) {
-            let obligations = collect_kani_obligations_for_manifest(base, &manifest)?;
-            if !obligations.is_empty() {
-                let kani_output = materialized_dir.join(format!(
-                    "{}_{}_kani.rs",
-                    sanitize_path(manifest_spec_stem(&manifest)),
-                    sanitize_path(&manifest.profile),
-                ));
-                fs::write(
-                    &kani_output,
-                    render_materialized_kani(&manifest, &obligations),
-                )
-                .with_context(|| format!("failed to write {}", kani_output.display()))?;
-                paths.push(kani_output);
-            }
+        if let Some(replay_path) = replay_path {
+            let output_path = materialized_dir.join(format!(
+                "{}_{}_replay.rs",
+                sanitize_path(manifest_spec_stem(&manifest)),
+                sanitize_path(&manifest.profile),
+            ));
+            fs::write(
+                &output_path,
+                render_materialized_test(&manifest, &replay_path),
+            )
+            .with_context(|| format!("failed to write {}", output_path.display()))?;
+            refresh_materialized_index(
+                &materialized_dir,
+                &materialized_index_path(base, &manifest),
+            )?;
+            paths.push(output_path);
+        } else {
+            bail!(
+                "no replay bundle found for spec={} profile={}",
+                manifest.spec,
+                manifest.profile
+            );
         }
     }
 
@@ -272,7 +328,8 @@ fn manifest_matches(manifest: &ManifestRecord, filter: &ManifestFilter) -> bool 
         .as_ref()
         .is_none_or(|spec| manifest.spec == *spec)
         && filter.binding.as_ref().is_none_or(|binding| {
-            manifest.binding == *binding
+            let binding = normalize_binding_path(binding);
+            manifest.binding == binding
                 || manifest
                     .binding
                     .rsplit("::")
@@ -283,6 +340,162 @@ fn manifest_matches(manifest: &ManifestRecord, filter: &ManifestFilter) -> bool 
             .profile
             .as_ref()
             .is_none_or(|profile| manifest.profile == *profile)
+}
+
+fn normalize_binding_path(raw: &str) -> String {
+    raw.split("::")
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn dedupe_manifests(manifests: Vec<ManifestRecord>) -> Vec<ManifestRecord> {
+    let mut unique = BTreeMap::new();
+    for manifest in manifests {
+        unique.insert(manifest_identity_key(&manifest), manifest);
+    }
+    unique.into_values().collect()
+}
+
+fn manifest_identity_key(manifest: &ManifestRecord) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        manifest.spec,
+        manifest.spec_path,
+        manifest.export_module,
+        manifest.crate_manifest_dir,
+        manifest.binding,
+        manifest.profile,
+    )
+}
+
+fn manifest_group_key(manifest: &ManifestRecord) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        manifest.spec,
+        manifest.spec_path,
+        manifest.export_module,
+        manifest.crate_manifest_dir,
+        manifest.binding,
+    )
+}
+
+fn augment_default_profiles(
+    base: &Path,
+    manifests: Vec<ManifestRecord>,
+    filter: &ManifestFilter,
+) -> Result<Vec<ManifestRecord>> {
+    let mut grouped = BTreeMap::<String, Vec<ManifestRecord>>::new();
+    for manifest in manifests {
+        grouped
+            .entry(manifest_group_key(&manifest))
+            .or_default()
+            .push(manifest);
+    }
+
+    let mut expanded = Vec::new();
+    for mut group in grouped.into_values() {
+        let Some(seed_manifest) = group.first().cloned() else {
+            continue;
+        };
+        let present_profiles = group
+            .iter()
+            .map(|manifest| manifest.profile.clone())
+            .collect::<BTreeSet<_>>();
+        let missing_profiles = seed_manifest
+            .default_profiles
+            .iter()
+            .filter(|profile| !present_profiles.contains(*profile))
+            .filter(|profile| {
+                filter
+                    .profile
+                    .as_ref()
+                    .is_none_or(|wanted| wanted == *profile)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if !missing_profiles.is_empty() {
+            let synthesized =
+                synthesize_profiles_for_manifest(base, &seed_manifest, &missing_profiles)?;
+            for profile in synthesized {
+                group.push(ManifestRecord {
+                    profile: profile.profile,
+                    engine: profile.engine,
+                    coverage: profile.coverage,
+                    ..seed_manifest.clone()
+                });
+            }
+        }
+
+        expanded.extend(group);
+    }
+
+    Ok(dedupe_manifests(expanded))
+}
+
+fn synthesize_profiles_for_manifest(
+    base: &Path,
+    manifest: &ManifestRecord,
+    labels: &[String],
+) -> Result<Vec<ProfileRecord>> {
+    let base = absolute_path(base)?;
+    let helper_dir = helper_dir_for_manifest(&base, manifest).join("profiles");
+    let src_dir = helper_dir.join("src");
+    fs::create_dir_all(&src_dir)
+        .with_context(|| format!("failed to create {}", src_dir.display()))?;
+    let workspace_root = workspace_root_from_base(&base);
+    fs::write(
+        helper_dir.join("Cargo.toml"),
+        render_helper_cargo_toml(manifest, &workspace_root),
+    )
+    .with_context(|| {
+        format!(
+            "failed to write {}",
+            helper_dir.join("Cargo.toml").display()
+        )
+    })?;
+    fs::write(
+        src_dir.join("main.rs"),
+        render_profile_helper_main_rs(manifest, labels),
+    )
+    .with_context(|| format!("failed to write {}", src_dir.join("main.rs").display()))?;
+
+    let output = Command::new("cargo")
+        .arg("run")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(helper_dir.join("Cargo.toml"))
+        .current_dir(&workspace_root)
+        .env(
+            "CARGO_TARGET_DIR",
+            workspace_root
+                .join("target")
+                .join("nirvash")
+                .join("materialize-helper-target"),
+        )
+        .output()
+        .with_context(|| "failed to run profile synthesis helper".to_owned())?;
+    if !output.status.success() {
+        bail!(
+            "profile synthesis helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut profiles = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        profiles.push(
+            serde_json::from_str::<ProfileRecord>(line)
+                .with_context(|| format!("failed to decode helper profile line `{line}`"))?,
+        );
+    }
+    Ok(profiles)
 }
 
 fn latest_matching_replay_bundle(base: &Path, manifest: &ManifestRecord) -> Result<PathBuf> {
@@ -388,6 +601,54 @@ fn materialized_output_dir(base: &Path, manifest: &ManifestRecord) -> PathBuf {
         .join("generated")
 }
 
+fn materialized_index_path(base: &Path, manifest: &ManifestRecord) -> PathBuf {
+    if !manifest.crate_manifest_dir.is_empty() {
+        return PathBuf::from(&manifest.crate_manifest_dir)
+            .join("tests")
+            .join("generated.rs");
+    }
+    workspace_root_from_base(base)
+        .join("tests")
+        .join("generated.rs")
+}
+
+fn refresh_materialized_index(materialized_dir: &Path, index_path: &Path) -> Result<()> {
+    let mut generated_files = fs::read_dir(materialized_dir)
+        .with_context(|| format!("failed to read {}", materialized_dir.display()))?
+        .collect::<std::io::Result<Vec<_>>>()
+        .with_context(|| format!("failed to enumerate {}", materialized_dir.display()))?
+        .into_iter()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("rs"))
+        .collect::<Vec<_>>();
+    generated_files.sort();
+
+    let mut body = String::from(
+        "#![allow(non_snake_case)]\n\
+         // Generated by `cargo nirvash materialize-tests`\n\
+         // Cargo discovers this integration test crate and includes files from tests/generated/*.rs.\n\n",
+    );
+    for path in generated_files {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("invalid generated replay filename: {}", path.display()))?;
+        let module_name = sanitize_ident(
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| {
+                    anyhow!("invalid generated replay module name: {}", path.display())
+                })?,
+        );
+        body.push_str(&format!(
+            "#[path = \"generated/{file_name}\"]\nmod {module_name};\n"
+        ));
+    }
+    fs::write(index_path, body)
+        .with_context(|| format!("failed to write {}", index_path.display()))?;
+    Ok(())
+}
+
 fn render_materialized_test(manifest: &ManifestRecord, replay_path: &Path) -> String {
     let crate_ident = crate_root_ident(&manifest.crate_package);
     let export_module = normalize_subject_path(&manifest.export_module, &crate_ident);
@@ -399,103 +660,30 @@ fn render_materialized_test(manifest: &ManifestRecord, replay_path: &Path) -> St
     );
     format!(
         "// Generated by `cargo nirvash materialize-tests`\n\
+         // run with `cargo test -- --nocapture` to see tracing::debug route logs\n\
          // spec: {spec}\n\
          // binding: {binding}\n\
          // replay: {replay}\n\n\
          #[test]\n\
          fn {test_name}() {{\n\
+             let _guard = ::nirvash_conformance::__enter_generated_test_tracing();\n\
+             ::nirvash_conformance::__debug_materialized_replay_test_start(\n\
+                 \"{test_name}\",\n\
+                 \"{spec}\",\n\
+                 \"{profile}\",\n\
+                 \"{binding}\",\n\
+                 ::std::path::Path::new(r#\"{replay}\"#),\n\
+             );\n\
              {export_module}::replay::run::<{binding}>(r#\"{replay}\"#)\n\
                  .expect(\"materialized replay should pass\");\n\
          }}\n",
         spec = manifest.spec,
+        profile = manifest.profile,
         binding = binding,
         export_module = export_module,
         replay = replay_path.display(),
         test_name = test_name,
     )
-}
-
-fn manifest_has_kani(engine: &Value) -> bool {
-    !extract_kani_depths(engine).is_empty()
-}
-
-fn extract_kani_depths(engine: &Value) -> Vec<usize> {
-    let mut depths = Vec::new();
-    if let Some(values) = engine.as_array() {
-        for value in values {
-            let depth = value
-                .get("k_bounded")
-                .and_then(|value| value.get("depth"))
-                .and_then(Value::as_u64)
-                .or_else(|| value.get("depth").and_then(Value::as_u64));
-            if let Some(depth) = depth {
-                let depth = depth as usize;
-                if !depths.contains(&depth) {
-                    depths.push(depth);
-                }
-            }
-        }
-    }
-    depths
-}
-
-fn collect_kani_obligations_for_manifest(
-    base: &Path,
-    manifest: &ManifestRecord,
-) -> Result<Vec<KaniObligationRecord>> {
-    let helper_dir = helper_dir_for_manifest(base, manifest);
-    let src_dir = helper_dir.join("src");
-    fs::create_dir_all(&src_dir)
-        .with_context(|| format!("failed to create {}", src_dir.display()))?;
-    let workspace_root = workspace_root_from_base(base);
-    fs::write(
-        helper_dir.join("Cargo.toml"),
-        render_helper_cargo_toml(manifest, &workspace_root),
-    )
-    .with_context(|| {
-        format!(
-            "failed to write {}",
-            helper_dir.join("Cargo.toml").display()
-        )
-    })?;
-    fs::write(src_dir.join("main.rs"), render_helper_main_rs(manifest))
-        .with_context(|| format!("failed to write {}", src_dir.join("main.rs").display()))?;
-
-    let output = Command::new("cargo")
-        .arg("run")
-        .arg("--quiet")
-        .arg("--manifest-path")
-        .arg(helper_dir.join("Cargo.toml"))
-        .current_dir(&workspace_root)
-        .env(
-            "CARGO_TARGET_DIR",
-            workspace_root
-                .join("target")
-                .join("nirvash")
-                .join("materialize-helper-target"),
-        )
-        .output()
-        .with_context(|| "failed to run kani materialize helper".to_owned())?;
-    if !output.status.success() {
-        bail!(
-            "kani materialize helper failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let mut obligations = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        obligations.push(
-            serde_json::from_str::<KaniObligationRecord>(line).with_context(|| {
-                format!("failed to decode helper kani obligation line `{line}`")
-            })?,
-        );
-    }
-    Ok(obligations)
 }
 
 fn helper_dir_for_manifest(base: &Path, manifest: &ManifestRecord) -> PathBuf {
@@ -510,6 +698,16 @@ fn helper_dir_for_manifest(base: &Path, manifest: &ManifestRecord) -> PathBuf {
     manifest.crate_manifest_dir.hash(&mut hasher);
     let hash = format!("{:016x}", hasher.finish());
     base.join("materialize-helper").join(hash)
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .with_context(|| "failed to resolve current directory".to_owned())?
+            .join(path))
+    }
 }
 
 fn crate_root_ident(package: &str) -> String {
@@ -556,20 +754,20 @@ fn normalize_external_module_path(path: &str) -> String {
     }
 }
 
-fn normalize_local_module_path(path: &str) -> String {
-    let mut segments = path.split("::");
-    let _ = segments.next();
-    let tail = segments.collect::<Vec<_>>();
-    if tail.is_empty() {
-        "crate".to_owned()
-    } else {
-        format!("crate::{}", tail.join("::"))
-    }
+fn local_conformance_crate_dir(workspace_root: &Path) -> Option<PathBuf> {
+    local_workspace_crate_dir(workspace_root, "nirvash-conformance")
 }
 
-fn local_conformance_crate_dir(workspace_root: &Path) -> Option<PathBuf> {
-    let crate_dir = workspace_root.join("crates").join("nirvash-conformance");
-    crate_dir.join("Cargo.toml").is_file().then_some(crate_dir)
+fn local_workspace_crate_dir(workspace_root: &Path, crate_name: &str) -> Option<PathBuf> {
+    let mut cursor = Some(workspace_root);
+    while let Some(root) = cursor {
+        let crate_dir = root.join("crates").join(crate_name);
+        if crate_dir.join("Cargo.toml").is_file() {
+            return Some(crate_dir);
+        }
+        cursor = root.parent();
+    }
+    None
 }
 
 fn render_helper_cargo_toml(manifest: &ManifestRecord, workspace_root: &Path) -> String {
@@ -587,57 +785,20 @@ fn render_helper_cargo_toml(manifest: &ManifestRecord, workspace_root: &Path) ->
             )
         };
     format!(
-        "[package]\nname = \"nirvash_materialize_helper\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nsubject_crate = {{ package = {crate_package:?}, path = {crate_manifest_dir:?} }}\n{conformance_dependency}\nserde_json = \"1\"\n",
+        "[package]\nname = \"nirvash_materialize_helper\"\nversion = \"0.0.0\"\nedition = \"2024\"\npublish = false\n\n[workspace]\n\n[dependencies]\nsubject_crate = {{ package = {crate_package:?}, path = {crate_manifest_dir:?} }}\n{conformance_dependency}\nserde_json = \"1\"\n",
         crate_package = manifest.crate_package,
         crate_manifest_dir = manifest.crate_manifest_dir,
         conformance_dependency = conformance_dependency,
     )
 }
 
-fn render_helper_main_rs(manifest: &ManifestRecord) -> String {
+fn render_profile_helper_main_rs(manifest: &ManifestRecord, labels: &[String]) -> String {
     let export_module = normalize_external_module_path(&manifest.export_module);
+    let encoded_labels = serde_json::to_string(labels).expect("encode profile labels");
     format!(
-        "fn main() {{\n    let profile = {export_module}::plans::profile_for_label({profile:?})\n        .expect(\"kani profile should exist\");\n    let depth = profile\n        .engines\n        .iter()\n        .find_map(|engine| match engine {{\n            nirvash_conformance::EnginePlan::KaniBounded {{ depth }} => Some(*depth),\n            _ => None,\n        }})\n        .expect(\"kani profile should include EnginePlan::KaniBounded\");\n    let obligations = {export_module}::plans::collect_kani_obligations_for({profile:?})\n        .expect(\"kani obligations should collect\");\n    for obligation in obligations {{\n        println!(\"{{}}\", serde_json::json!({{\n            \"profile\": {profile:?},\n            \"depth\": depth,\n            \"obligation_id\": obligation.id,\n            \"actions\": obligation.actions,\n        }}));\n    }}\n}}\n",
+        "fn main() {{\n    let labels: ::std::vec::Vec<::std::string::String> = serde_json::from_str(r#\"{encoded_labels}\"#)\n        .expect(\"profile labels should decode\");\n    for label in labels {{\n        if let Some(profile) = {export_module}::plans::profile_for_label(&label) {{\n            println!(\"{{}}\", serde_json::json!({{\n                \"profile\": label,\n                \"engine\": profile.engines,\n                \"coverage\": profile.coverage,\n            }}));\n        }}\n    }}\n}}\n",
+        encoded_labels = encoded_labels,
         export_module = export_module,
-        profile = manifest.profile,
-    )
-}
-
-fn render_materialized_kani(
-    manifest: &ManifestRecord,
-    obligations: &[KaniObligationRecord],
-) -> String {
-    let local_export_module = normalize_local_module_path(&manifest.export_module);
-    let action_ty = format!("{local_export_module}::bindings::Action");
-    let proofs = obligations
-        .iter()
-        .enumerate()
-        .map(|(index, obligation)| {
-            let fn_name = format!(
-                "{}_{}_{}",
-                sanitize_ident(&manifest.profile),
-                index,
-                sanitize_ident(&obligation.obligation_id),
-            );
-            let encoded_actions =
-                serde_json::to_string(&obligation.actions).expect("encode materialized actions");
-            format!(
-                "#[cfg(kani)]\n#[kani::proof]\nfn {fn_name}() {{\n    let actions: ::std::vec::Vec<{action_ty}> = ::serde_json::from_str(r#\"{encoded_actions}\"#)\n        .expect(\"materialized kani actions should decode\");\n    {local_export_module}::install::__run_materialized_kani::<__NirvashBinding>(\n        __NIRVASH_BINDING_NAME,\n        {profile:?},\n        {obligation_id:?},\n        &actions,\n    )\n    .expect(\"materialized kani proof should pass\");\n}}\n",
-                fn_name = fn_name,
-                action_ty = action_ty,
-                encoded_actions = encoded_actions,
-                local_export_module = local_export_module,
-                profile = obligation.profile,
-                obligation_id = obligation.obligation_id,
-            )
-        })
-        .collect::<String>();
-    format!(
-        "// Generated by `cargo nirvash materialize-tests`\n// spec: {spec}\n// binding: {binding}\n// profile: {profile}\n\n{proofs}",
-        spec = manifest.spec,
-        binding = manifest.binding,
-        profile = manifest.profile,
-        proofs = proofs,
     )
 }
 
@@ -706,6 +867,25 @@ mod tests {
         }
     }
 
+    fn manifest_json_with_binding_aliases(crate_manifest_dir: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "spec_name": "demo.spec",
+            "spec_slug": "",
+            "spec_path": "demo_crate::DemoSpec",
+            "export_module": "crate::demo::generated",
+            "crate_package": "demo-crate",
+            "crate_manifest_dir": crate_manifest_dir.display().to_string(),
+            "default_profiles": ["small"],
+            "binding": "crate::demo::DemoBinding",
+            "binding_path": "crate::demo::DemoBinding",
+            "profile": "small",
+            "engines": ["explicit_suite"],
+            "coverage": ["transitions"],
+            "replay_dir": "target/nirvash/replay",
+            "materialize_failures": true
+        })
+    }
+
     fn write_replay_files(base: &Path) -> (PathBuf, PathBuf) {
         let replay_dir = base.join("replay");
         fs::create_dir_all(&replay_dir).expect("replay dir");
@@ -765,6 +945,66 @@ mod tests {
     }
 
     #[test]
+    fn list_tests_decodes_manifest_with_binding_and_binding_path() {
+        let temp = tempdir().expect("tempdir");
+        let base = temp.path().join("nirvash");
+        let manifest_dir = base.join("manifest");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        let crate_manifest_dir = temp.path().join("demo-crate");
+        fs::create_dir_all(&crate_manifest_dir).expect("crate manifest dir");
+        let manifest_path = manifest_dir.join("demo_spec__demo_binding__small.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest_json_with_binding_aliases(&crate_manifest_dir))
+                .expect("encode manifest"),
+        )
+        .expect("write manifest");
+
+        let manifests = list_tests(&base, &ManifestFilter::default()).expect("list manifests");
+
+        assert_eq!(manifests, vec![manifest_record(&crate_manifest_dir)]);
+    }
+
+    #[test]
+    fn list_tests_normalizes_binding_whitespace_and_dedupes_stale_manifests() {
+        let temp = tempdir().expect("tempdir");
+        let base = temp.path().join("nirvash");
+        let manifest_dir = base.join("manifest");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        let crate_manifest_dir = temp.path().join("demo-crate");
+        fs::create_dir_all(&crate_manifest_dir).expect("crate manifest dir");
+
+        let first_path = manifest_dir.join("demo_spec__binding_spaced__small.json");
+        let second_path = manifest_dir.join("demo_spec__binding_normalized__small.json");
+        let mut first = manifest_json_with_binding_aliases(&crate_manifest_dir);
+        first["binding"] = serde_json::json!("crate :: demo :: DemoBinding");
+        first["binding_path"] = serde_json::json!("crate :: demo :: DemoBinding");
+        let second = manifest_json_with_binding_aliases(&crate_manifest_dir);
+        fs::write(
+            &first_path,
+            serde_json::to_vec_pretty(&first).expect("encode manifest"),
+        )
+        .expect("write spaced manifest");
+        fs::write(
+            &second_path,
+            serde_json::to_vec_pretty(&second).expect("encode manifest"),
+        )
+        .expect("write normalized manifest");
+
+        let manifests = list_tests(
+            &base,
+            &ManifestFilter {
+                spec: Some("demo.spec".to_owned()),
+                binding: Some("crate :: demo :: DemoBinding".to_owned()),
+                profile: Some("small".to_owned()),
+            },
+        )
+        .expect("list manifests");
+
+        assert_eq!(manifests, vec![manifest_record(&crate_manifest_dir)]);
+    }
+
+    #[test]
     fn materialize_tests_writes_rust_replay_file() {
         let temp = tempdir().expect("tempdir");
         let base = temp.path().join("nirvash");
@@ -804,6 +1044,47 @@ mod tests {
             )
         );
         assert!(body.contains(&json_path.display().to_string()));
+        let index = crate_manifest_dir.join("tests/generated.rs");
+        let index_body = fs::read_to_string(&index).expect("read generated index");
+        assert!(index_body.contains("#[path = \"generated/demo_spec_small_replay.rs\"]"));
+        assert!(index_body.contains("mod demo_spec_small_replay;"));
+    }
+
+    #[test]
+    fn materialize_tests_accepts_binding_whitespace_aliases() {
+        let temp = tempdir().expect("tempdir");
+        let base = temp.path().join("nirvash");
+        let manifest_dir = base.join("manifest");
+        fs::create_dir_all(&manifest_dir).expect("manifest dir");
+        let crate_manifest_dir = temp.path().join("demo-crate");
+        fs::create_dir_all(&crate_manifest_dir).expect("crate manifest dir");
+        let manifest_path = manifest_dir.join("demo_spec__demo_binding__small.json");
+        let mut manifest = manifest_json_with_binding_aliases(&crate_manifest_dir);
+        manifest["binding"] = serde_json::json!("crate :: demo :: DemoBinding");
+        manifest["binding_path"] = serde_json::json!("crate :: demo :: DemoBinding");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("encode manifest"),
+        )
+        .expect("write manifest");
+        let (json_path, _) = write_replay_files(&base);
+
+        let materialized = materialize_tests(
+            &base,
+            &MaterializeRequest {
+                spec: "demo.spec".to_owned(),
+                binding: "crate :: demo :: DemoBinding".to_owned(),
+                profile: "small".to_owned(),
+                replay: Some(json_path),
+            },
+        )
+        .expect("materialize replay");
+
+        assert_eq!(materialized.len(), 1);
+        assert_eq!(
+            materialized[0],
+            crate_manifest_dir.join("tests/generated/demo_spec_small_replay.rs")
+        );
     }
 
     #[test]
@@ -866,34 +1147,6 @@ mod tests {
             materialized[0],
             crate_manifest_dir.join("tests/generated/demo_spec_small_replay.rs")
         );
-    }
-
-    #[test]
-    fn kani_detection_and_rendering_use_obligation_ids() {
-        let temp = tempdir().expect("tempdir");
-        let crate_manifest_dir = temp.path().join("demo-crate");
-        fs::create_dir_all(&crate_manifest_dir).expect("crate manifest dir");
-        let mut manifest = manifest_record(&crate_manifest_dir);
-        manifest.engine = serde_json::json!([
-            { "k_bounded": { "depth": 4 } }
-        ]);
-
-        assert!(manifest_has_kani(&manifest.engine));
-
-        let body = render_materialized_kani(
-            &manifest,
-            &[KaniObligationRecord {
-                profile: "small".to_owned(),
-                depth: 4,
-                obligation_id: "explicit-cover-0".to_owned(),
-                actions: serde_json::json!(["tick"]),
-            }],
-        );
-
-        assert!(body.contains("#[kani::proof]"));
-        assert!(body.contains("__run_materialized_kani::<__NirvashBinding>"));
-        assert!(body.contains("explicit-cover-0"));
-        assert!(body.contains("serde_json::from_str"));
     }
 
     #[test]

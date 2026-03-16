@@ -1,3 +1,5 @@
+extern crate self as nirvash;
+
 mod action_vocabulary;
 mod doc_graph;
 mod dsl_macros;
