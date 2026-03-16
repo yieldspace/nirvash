@@ -89,6 +89,8 @@ For the authoring facade and the full architecture diagrams, see
 
 - `examples/lock-manager-model`
   - Smallest end-to-end example for TLA+-style system modeling in Rust
+- `examples/deadlock-formal-model`
+  - Intentional formal failure example that reaches a deadlock and makes `formal_tests` fail
 - `examples/docker-compose-model`
   - Larger example that adds docgen output, a richer runtime, and a more operational state
     machine
